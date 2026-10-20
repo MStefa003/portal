@@ -2,8 +2,7 @@
 
 Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
 
-> Status: draft. The manifest (M1) and the peer protocol (M2) are specified
-> below; the rendezvous and handshake layers follow in M3. Until the first
+> Status: draft. All three layers are specified below. Until the first
 > release the protocol may change without notice.
 
 ## Conventions
@@ -16,12 +15,107 @@ Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
 
 ## Layers
 
-1. **Rendezvous** (WebSocket to `portal-rendezvous`): channel allocation and an
-   opaque mailbox.
-2. **Handshake** (inside the mailbox): SPAKE2 messages, then node addresses
-   encrypted with the derived key.
+1. **Rendezvous** (WebSocket to `portal-rendezvous`): nameplate allocation and
+   an opaque relay between two clients.
+2. **Handshake** (relayed): SPAKE2, then one sealed message each way carrying
+   the peers' iroh identities.
 3. **Peer** (iroh QUIC, ALPN `portal/1`): a control stream plus parallel data
    streams carrying chunks.
+
+## Codes
+
+A code is `<nameplate>-<word>-<word>`, for example `7-cedar-river`.
+
+- **Nameplate**: a decimal number from 1 to 9,999,999, handed out by the
+  rendezvous server. It is not secret. The server draws it at random from
+  `1..=max(99, 4 × waiting senders)`, so codes stay short.
+- **Words**: 2 words chosen uniformly by the sender from a 1,295-word list
+  (the EFF Short Wordlist #1 without "yo-yo"; see `NOTICE`), using the OS
+  random number generator. That gives about 20.7 bits.
+- Parsing is case-insensitive and accepts spaces instead of hyphens. A word
+  that is not on the list is rejected *before* any network traffic, with a
+  suggestion for the closest word, so typos do not use up the code.
+- The canonical form (lowercase, single hyphens) is the SPAKE2 password.
+
+20.7 bits is fine because an attacker gets **one online guess per code**:
+the first claim of a nameplate consumes it, and a wrong guess makes the
+sender abort. The chance of a successful guess is 1 in 1,677,025.
+
+## Rendezvous protocol (version 1)
+
+WebSocket at `<server>/v1` (`ws://` or `wss://`). Each binary WebSocket
+message is one postcard `ClientMsg` or `ServerMsg`; text messages are a
+protocol error. WebSocket messages are capped at **8 KiB**.
+
+| # | `ClientMsg` | Meaning |
+|---|---|---|
+| 0 | `Hello { version, min_version }` | first message |
+| 1 | `Allocate` | sender: reserve a nameplate |
+| 2 | `Claim { nameplate }` | receiver: join that sender |
+| 3 | `Relay(bytes)` | forward to the paired peer (at most 4 KiB, at most 8 per client) |
+
+| # | `ServerMsg` | Meaning |
+|---|---|---|
+| 0 | `Welcome { version, min_version }` | reply to `Hello` |
+| 1 | `Allocated { nameplate }` | reply to `Allocate` |
+| 2 | `Paired` | both peers present; relaying is open |
+| 3 | `Relay(bytes)` | payload from the peer |
+| 4 | `PeerLeft` | the peer disconnected |
+| 5 | `Error(code)` | `Version`, `UnknownNameplate`, `Busy`, `Expired` or `Protocol`; the server then closes |
+
+```text
+sender                      server                      receiver
+  │── Hello ──────────────────►│◄────────────────── Hello ──│
+  │◄──────────────── Welcome ──│── Welcome ────────────────►│
+  │── Allocate ───────────────►│                            │
+  │◄────── Allocated { 7 } ────│                            │
+  │   (shows 7-cedar-river)    │◄──────── Claim { 7 } ──────│
+  │◄───────────────── Paired ──│── Paired ─────────────────►│
+  │◄═══════════ Relay × n ════►│◄═══════════ Relay × n ════►│
+```
+
+Server rules:
+- `Hello` must arrive within 10 s, and so must `Allocate` or `Claim`.
+- A nameplate is single-use: `Claim` removes it, so a second claim gets
+  `UnknownNameplate`. It is also freed when the sender disconnects.
+- An unclaimed nameplate expires after 1 hour (configurable), and a pairing
+  after 60 s.
+- Limits on waiting senders and on open connections; beyond them, `Busy`.
+- The server pings waiting senders every 30 s to keep proxies from dropping
+  idle connections.
+- The server logs neither nameplates nor payloads.
+
+## Handshake (protocol version 1)
+
+Runs over `Relay` messages once both peers are `Paired`. Each relayed payload
+is one postcard `PeerMsg`:
+
+| # | `PeerMsg` | Meaning |
+|---|---|---|
+| 0 | `Pake { version, min_version, msg }` | peer protocol versions plus the 33-byte SPAKE2 message |
+| 1 | `Sealed(bytes)` | ChaCha20-Poly1305 ciphertext |
+
+1. Both sides send `Pake` right away. SPAKE2 runs over Ed25519 in symmetric
+   mode, with password = the canonical code and identity =
+   `portal/1 code handshake`. `Pake` is variant 0 forever, so a version
+   mismatch shows as a version error rather than a wrong code.
+2. From the 32-byte SPAKE2 key `K`, each direction gets its own key:
+   `blake3::derive_key("portal 2026-10-21 sealed message from sender", K)`
+   and `... from receiver`. Because each key seals exactly one message, the
+   nonce is fixed at zero. Separate keys also mean a reflected message never
+   opens.
+3. The sender sends `Sealed(postcard(EndpointAddr))`: its node ID plus relay
+   URL and IP addresses. The receiver sends `Sealed(postcard(EndpointId))`.
+4. Failure to open a `Sealed` message means the codes differed: the side
+   that notices aborts, and the code is gone.
+5. Both close the WebSocket. The receiver dials the sender's `EndpointAddr`
+   over iroh. iroh's TLS authenticates the node ID, and the receiver checks it
+   again. The sender accepts **only** the node ID from step 3 and closes any
+   other connection.
+
+The rendezvous server cannot read or alter the identities without the code
+words, so it cannot place itself in the middle. The most it can do is refuse
+service.
 
 ## Manifest (format version 1)
 

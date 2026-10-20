@@ -6,37 +6,42 @@ end-to-end encrypted, resumable, and simple to use.
 ```console
 # Machine A
 $ portal send ./project
-Code: 7-sunset-river
+Code: 7-cedar-river
 Waiting for receiver...
 
 # Machine B
-$ portal receive 7-sunset-river
+$ portal receive 7-cedar-river
 Receiving "project" (1,284 files, 2.3 GB) from 192.168.1.20 [direct]
 [████████████░░░░░░░░] 61%  48 MB/s  ETA 0:19
 ```
 
-> **Status:** early development (milestone M2). Transfers work between two
-> machines using a long address; short codes like `7-sunset-river` come in M3.
+> **Status:** early development (milestone M3). Transfers work end to end
+> with short codes. There is no public rendezvous server yet, so you run your
+> own; it takes one command.
 
-## Try it (M2)
+## Try it (M3)
 
 ```console
+# Anywhere both machines can reach (see docs/SELF_HOSTING.md)
+$ portal-rendezvous --listen 0.0.0.0:8080
+
 # Machine A
-$ portal send ./project
-Sending "project" (2 files, 2.00 MB)
+$ portal send --rendezvous ws://192.168.1.10:8080/v1 ./project
+Sending "project" (2 files, 5.00 MB)
+Code: 22-baker-hazy
 
 On the other machine, run:
 
-  portal receive --addr cd564b70a3…
+  portal receive --rendezvous ws://192.168.1.10:8080/v1 22-baker-hazy
 
 # Machine B
-$ portal receive --addr cd564b70a3…
-Receiving "project" (2 files, 2.00 MB) from 192.168.2.9 [direct]
-✓ Received 2 files, 2.00 MB into C:\Users\you\Downloads
+$ portal receive --rendezvous ws://192.168.1.10:8080/v1 22-baker-hazy
+Receiving "project" (2 files, 5.00 MB) from 192.168.1.20 [direct]
+✓ Received 2 files, 5.00 MB into C:\Users\you\Downloads
 ```
 
-Until M3 adds the authenticated short-code handshake, anyone who has the
-address can connect, so only share it over a channel you trust.
+Set `PORTAL_RENDEZVOUS` once to skip the flag. Each code works once: a wrong
+guess cancels the transfer, so nobody gets a second try.
 
 ## Goals
 
@@ -68,7 +73,8 @@ see `link: extra operand`, Git's coreutils `link` is shadowing MSVC's
 | `portal-cli` | The `portal` binary |
 | `portal-rendezvous` | Self-hostable server that pairs peers by short code |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/PROTOCOL.md](docs/PROTOCOL.md).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROTOCOL.md](docs/PROTOCOL.md)
+and [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
 ## License
 
@@ -78,3 +84,8 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the Apache-2.0 license,
 shall be dual licensed as above, without any additional terms or conditions.
+
+Code words come from the [EFF Short Wordlist #1](https://www.eff.org/dice)
+by the Electronic Frontier Foundation, licensed under
+[CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/) (one word
+removed). See [NOTICE](NOTICE).

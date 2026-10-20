@@ -7,6 +7,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- M3: short codes and authenticated pairing:
+  - `portal send` shows a code like `7-cedar-river`; `portal receive <code>`
+    (or prompts for it). Typos are caught locally with a suggestion.
+  - SPAKE2 over a rendezvous relay, then one ChaCha20-Poly1305 sealed message
+    each way. The sender accepts only the receiver that proved it knows the
+    code. One guess per code.
+  - `portal-rendezvous` server: single-use nameplates, expiry, size, count
+    and connection limits; Dockerfile and docs/SELF_HOSTING.md.
+  - `--rendezvous` / `PORTAL_RENDEZVOUS` to choose the server.
 - M2: direct transfers over iroh (QUIC, hole punching, relay fallback):
   - `portal send <path>` prints an address; `portal receive --addr <address>`
     downloads into the current folder (or `--output`), with `--overwrite`.
@@ -35,3 +44,6 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - `portal` CLI skeleton with `send` and `receive` subcommands (not functional yet).
 - CI on Windows, macOS and Linux: fmt, clippy (`-D warnings`) and tests.
 - Dual MIT / Apache-2.0 license.
+
+### Removed
+- `portal receive --addr`: unauthenticated addresses are replaced by codes.

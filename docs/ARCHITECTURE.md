@@ -17,24 +17,43 @@ portal-rendezvous ──► portal-proto
   it consumes messages and emits actions, and never touches a socket. That
   makes it testable in-process, including dropped connections and corruption.
 - **portal-proto** defines every byte on the wire, the protocol version and
-  hard size caps for anything read from the network.
-- **portal-net** moves bytes: iroh endpoints, the rendezvous client and the
-  SPAKE2 handshake.
+  hard size caps for anything read from the network. It also holds the
+  sans-IO parts of the code handshake: code parsing, SPAKE2 and sealing.
+- **portal-net** moves bytes: iroh endpoints, the rendezvous client, and
+  sending and receiving transfers.
 - **portal-cli** is a thin layer: arguments, prompts, progress bars.
-- **portal-rendezvous** is a dumb mailbox. It never sees code words, keys or
-  file contents.
+- **portal-rendezvous** is a dumb mailbox (axum, WebSockets). It never sees
+  code words, keys or file contents. It is a library plus a binary, so tests
+  can run it in-process.
 
-## Connection flow (planned, M3)
+## Connection flow (M3)
 
-1. The sender asks the rendezvous server for a channel number and generates
-   two random words locally: `<channel>-<word>-<word>`.
-2. Both peers join the channel and run SPAKE2 using the full code as password.
-   A wrong code yields different keys; decryption of the next message fails,
-   both sides abort and the channel is burned (one guess per code).
-3. Each side sends its iroh node address encrypted with the derived key.
-4. Peers connect over iroh (QUIC, hole punching, relay fallback) and verify the
-   remote node ID equals the one received in step 3, which defeats a
-   man-in-the-middle at the rendezvous server.
+1. The sender connects to the rendezvous server, gets a nameplate (`7`) and
+   picks two random words locally: `7-cedar-river`.
+2. The receiver types the code. It is checked against the wordlist offline
+   first, then the receiver claims nameplate 7. The server pairs the two
+   WebSockets and consumes the nameplate.
+3. Both run SPAKE2 with the full code as password, relayed by the server.
+   A wrong code gives different keys, so the sealed message that follows
+   fails to open and both sides abort. One guess per code.
+4. The sender seals its iroh `EndpointAddr`; the receiver seals its node ID.
+5. They hang up on the server and connect over iroh (QUIC, hole punching,
+   relay fallback):
+   - the receiver dials exactly the sealed address, and iroh's TLS proves it
+     reached that node ID;
+   - the sender accepts only the sealed node ID.
+
+   That closes the gap a man-in-the-middle at the rendezvous server would need.
+
+### Threat model
+
+| Attacker | Can | Cannot |
+|---|---|---|
+| Rendezvous server operator | see nameplates, timing and IP addresses; refuse service | learn the words, swap identities, read files |
+| Network observer | see that two hosts talk QUIC (and to which relay) | read anything: TLS 1.3 inside QUIC |
+| iroh relay operator | see node IDs and encrypted traffic volume | read or alter traffic |
+| Someone guessing codes | take one guess per code (1 in 1.68 M) and make that transfer fail | try again on the same code |
+| Malicious sender | send arbitrary bytes | write outside the destination, overwrite without consent, exhaust memory (see below) |
 
 ## Transfer flow
 
