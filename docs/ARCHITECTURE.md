@@ -36,9 +36,53 @@ portal-rendezvous ──► portal-proto
    remote node ID equals the one received in step 3, which defeats a
    man-in-the-middle at the rendezvous server.
 
-## Transfer flow (planned, M1–M4)
+## Transfer flow
 
-Sender builds a manifest (relative paths, sizes, mtimes, chunk hashes);
-receiver diffs it against what it already has and requests only missing
-chunks; chunks are verified with BLAKE3, written into `.portal-partial`, and
-completed files are atomically moved into place.
+```
+ sender                                   receiver
+ ──────                                   ────────
+ scan(root) ──► Manifest ──── bytes ────► Manifest::from_bytes (validates)
+                                          Sink::new  (checks conflicts)
+                                 ◄─────── sink.missing_chunks()
+ Source::read_chunk(hash) ── chunk ─────► sink.write_chunk(hash, data)
+                                          sink.finish()
+```
+
+In M1 the "bytes" arrows are function calls in one process
+(`crates/portal-core/tests/local_transfer.rs`); from M2 they are QUIC streams.
+
+### Chunking and deduplication
+
+`chunk.rs` cuts files with FastCDC: a rolling hash over the content decides
+where chunks end, so the boundaries follow the content and not the byte
+offsets. Insert a line near the top of a file and only the chunk around the
+insertion changes; all later chunks keep their boundaries and their BLAKE3
+hashes. Chunks are addressed by hash, so the receiver asks for each distinct
+hash once, even when it occurs in several files.
+
+### Why the receiver is safe against a malicious sender
+
+- **Paths.** A `SafeRelPath` can only be created through validation,
+  including when it is deserialized. Holding one means the path is relative,
+  has no `..`, and is valid on Windows, macOS and Linux (see PROTOCOL.md).
+  `SafeRelPath::to_path(dest)` joins it component by component.
+- **Existing files.** `Sink::new` checks the destination before anything is
+  written. Existing files are a conflict, refused unless overwriting was
+  allowed. Symbolic links and file-vs-folder mismatches are always refused,
+  so a pre-existing link cannot redirect writes outside the destination.
+  The check is repeated immediately before each file is moved into place.
+- **Content.** Each chunk is hashed before it is written. Each file is
+  assembled in `<dest>/.portal-partial/<id>/`, hashed again as a whole once
+  complete, and only then renamed to its final path. A corrupted or
+  incomplete transfer never leaves a file at a final path.
+- **Sizes.** The manifest is capped at 256 MiB encoded and 1,000,000 entries,
+  and chunks at 1 MiB. Collection lengths in the encoding are
+  attacker-controlled, but serde caps preallocation, so a lying length
+  fails without allocating.
+
+### Known limitation
+
+There is a window between the last check and `rename` in which a local
+process could swap a directory for a symlink. Closing it fully needs
+handle-relative filesystem APIs (`openat`-style), which would mean either
+`unsafe` code or an extra dependency such as `cap-std`; deferred for now.

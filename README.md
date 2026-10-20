@@ -15,7 +15,7 @@ Receiving "project" (1,284 files, 2.3 GB) from 192.168.1.20 [direct]
 [████████████░░░░░░░░] 61%  48 MB/s  ETA 0:19
 ```
 
-> **Status:** early development (milestone M0). Nothing transfers yet.
+> **Status:** early development (milestone M1). The transfer core works in-process; networking comes in M2.
 
 ## Goals
 
