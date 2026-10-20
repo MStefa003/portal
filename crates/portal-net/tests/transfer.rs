@@ -1,5 +1,6 @@
-//! Real transfers between two iroh endpoints over 127.0.0.1, plus a
-//! hand-written malicious sender to check that the receiver fails safely.
+//! Real transfers between two iroh endpoints over 127.0.0.1, paired through a
+//! real rendezvous server, plus hand-written malicious peers to check that
+//! both sides fail safely.
 #![allow(clippy::unwrap_used)] // test helpers, not just #[test] fns
 
 use std::fs;
@@ -8,13 +9,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use portal_core::{OverwritePolicy, ScanOptions, SinkError, scan};
-use portal_net::{Event, NetError, NetMode, ReceiveOptions, Reporter, Ticket};
+use portal_net::{EndpointAddr, Event, NetError, NetMode, ReceiveOptions, Reporter};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
-    Control, DeclineReason, EncodedChunk, Encoding, MAX_CONTROL_FRAME, Offer, VersionError,
+    Code, Control, DeclineReason, EncodedChunk, Encoding, MAX_CONTROL_FRAME, Offer, PakeError,
+    RendezvousError, VersionError,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Starts an in-process rendezvous server; returns its URL.
+async fn rendezvous() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(portal_rendezvous::serve(
+        listener,
+        portal_rendezvous::Config::default(),
+    ));
+    url
+}
 
 fn quiet() -> Reporter {
     Arc::new(|_| {})
@@ -71,7 +84,8 @@ fn walk(root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
     out
 }
 
-/// Runs a real sender and receiver; returns both results and receiver events.
+/// Runs a real sender and receiver, paired by code; returns both results and
+/// the receiver's events.
 async fn run_transfer(
     src: &Path,
     dest: &Path,
@@ -81,15 +95,17 @@ async fn run_transfer(
     Result<portal_core::Summary, NetError>,
     Vec<Event>,
 ) {
+    let url = rendezvous().await;
     let scan = scan(src, &ScanOptions::default()).unwrap();
     let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
-    let ticket = portal_net::local_ticket(&sender, NetMode::Loopback).await;
-    // Go through the text form, exactly as a user would copy it.
-    let ticket: Ticket = ticket.to_string().parse().unwrap();
+    let waiting = portal_net::rendezvous::allocate(&url).await.unwrap();
+    // Go through the text form, exactly as a person would type it.
+    let code = Code::parse(&waiting.code().to_string()).unwrap();
 
     let root = src.to_path_buf();
     let send = tokio::spawn(async move {
-        let result = portal_net::send(&sender, &root, &scan.manifest, quiet()).await;
+        let peer = waiting.pair(&sender, NetMode::Loopback).await?;
+        let result = portal_net::send(&sender, peer, &root, &scan.manifest, quiet()).await;
         sender.close().await;
         result
     });
@@ -100,7 +116,10 @@ async fn run_transfer(
         dest: dest.to_path_buf(),
         overwrite,
     };
-    let received = portal_net::receive(&receiver, &ticket, options, reporter).await;
+    let addr = portal_net::rendezvous::join(&url, &code, &receiver)
+        .await
+        .unwrap();
+    let received = portal_net::receive(&receiver, addr, options, reporter).await;
     receiver.close().await;
     let sent = send.await.unwrap();
     let events = events.lock().unwrap().clone();
@@ -212,10 +231,10 @@ enum Evil {
 }
 
 /// A sender written directly against the protocol, to misbehave on purpose.
-async fn evil_sender(src: &Path, evil: Evil) -> (Ticket, tokio::task::JoinHandle<()>) {
+async fn evil_sender(src: &Path, evil: Evil) -> (EndpointAddr, tokio::task::JoinHandle<()>) {
     let manifest = scan(src, &ScanOptions::default()).unwrap().manifest;
     let endpoint = portal_net::bind(NetMode::Loopback, true).await.unwrap();
-    let ticket = portal_net::local_ticket(&endpoint, NetMode::Loopback).await;
+    let addr = portal_net::local_addr(&endpoint, NetMode::Loopback).await;
     let task = tokio::spawn(async move {
         let conn = endpoint.accept().await.unwrap().await.unwrap();
         let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
@@ -267,18 +286,26 @@ async fn evil_sender(src: &Path, evil: Evil) -> (Ticket, tokio::task::JoinHandle
         conn.closed().await;
         endpoint.close().await;
     });
-    (ticket, task)
+    (addr, task)
 }
 
-async fn receive_from(ticket: &Ticket, dest: &Path) -> Result<portal_core::Summary, NetError> {
+async fn receive_from(addr: EndpointAddr, dest: &Path) -> Result<portal_core::Summary, NetError> {
     let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+    let result = receive_with(&receiver, addr, dest).await;
+    receiver.close().await;
+    result
+}
+
+async fn receive_with(
+    endpoint: &portal_net::Endpoint,
+    addr: EndpointAddr,
+    dest: &Path,
+) -> Result<portal_core::Summary, NetError> {
     let options = ReceiveOptions {
         dest: dest.to_path_buf(),
         overwrite: OverwritePolicy::Never,
     };
-    let result = portal_net::receive(&receiver, ticket, options, quiet()).await;
-    receiver.close().await;
-    result
+    portal_net::receive(endpoint, addr, options, quiet()).await
 }
 
 #[tokio::test]
@@ -289,8 +316,8 @@ async fn corrupted_chunk_fails_safely() {
         fs::write(&src, vec![7u8; 200_000]).unwrap();
         let dest = tmp.path().join("out");
 
-        let (ticket, sender) = evil_sender(&src, Evil::CorruptChunk).await;
-        let result = receive_from(&ticket, &dest).await;
+        let (addr, sender) = evil_sender(&src, Evil::CorruptChunk).await;
+        let result = receive_from(addr, &dest).await;
         assert!(
             matches!(result, Err(NetError::Sink(SinkError::CorruptChunk(_)))),
             "{result:?}"
@@ -312,13 +339,119 @@ async fn incompatible_version_fails_clearly() {
         let src = tmp.path().join("f.txt");
         fs::write(&src, "x").unwrap();
 
-        let (ticket, sender) = evil_sender(&src, Evil::FutureVersion).await;
-        let result = receive_from(&ticket, &tmp.path().join("out")).await;
+        let (addr, sender) = evil_sender(&src, Evil::FutureVersion).await;
+        let result = receive_from(addr, &tmp.path().join("out")).await;
         let Err(NetError::Version(err @ VersionError::PeerTooNew { .. })) = result else {
             panic!("expected a version error, got {result:?}");
         };
         assert!(err.to_string().contains("update Portal"));
         sender.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn wrong_code_fails_on_both_sides() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let url = rendezvous().await;
+        let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
+        let waiting = portal_net::rendezvous::allocate(&url).await.unwrap();
+        let real = waiting.code().to_string();
+        let words: Vec<&str> = real.split('-').collect();
+        // Same number, one wrong word: what a guessing attacker would try.
+        let other = if words[2] == "acid" { "acorn" } else { "acid" };
+        let guess = Code::parse(&format!("{}-{}-{other}", words[0], words[1])).unwrap();
+
+        let pair = tokio::spawn(async move { waiting.pair(&sender, NetMode::Loopback).await });
+        let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let joined = portal_net::rendezvous::join(&url, &guess, &receiver).await;
+        assert!(
+            matches!(joined, Err(NetError::Pake(PakeError::WrongCode))),
+            "{joined:?}"
+        );
+        let paired = pair.await.unwrap();
+        assert!(
+            matches!(paired, Err(NetError::Pake(PakeError::WrongCode))),
+            "{paired:?}"
+        );
+
+        // The code is used up: even the right words no longer work.
+        let real = Code::parse(&real).unwrap();
+        let retry = portal_net::rendezvous::join(&url, &real, &receiver).await;
+        assert!(
+            matches!(
+                retry,
+                Err(NetError::Rendezvous(RendezvousError::UnknownNameplate))
+            ),
+            "{retry:?}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unknown_code_number_is_reported() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let url = rendezvous().await;
+        let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let code = Code::parse("4242-cedar-river").unwrap();
+        let joined = portal_net::rendezvous::join(&url, &code, &receiver).await;
+        assert!(
+            matches!(
+                joined,
+                Err(NetError::Rendezvous(RendezvousError::UnknownNameplate))
+            ),
+            "{joined:?}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unreachable_rendezvous_is_reported() {
+    let result = portal_net::rendezvous::allocate("ws://127.0.0.1:1/v1").await;
+    assert!(
+        matches!(result, Err(NetError::RendezvousConnect(_))),
+        "{result:?}"
+    );
+    let result = portal_net::rendezvous::allocate("https://example.com").await;
+    assert!(matches!(result, Err(NetError::RendezvousUrl)), "{result:?}");
+}
+
+/// A node that learned the sender's address some other way, but never
+/// proved it knows the code, is refused; the real receiver still gets in.
+#[tokio::test]
+async fn sender_only_accepts_the_paired_receiver() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("f.txt");
+        fs::write(&src, "for the right receiver only").unwrap();
+        let manifest = scan(&src, &ScanOptions::default()).unwrap().manifest;
+
+        let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
+        let sender_addr = portal_net::local_addr(&sender, NetMode::Loopback).await;
+        let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let peer = receiver.id();
+        let send = tokio::spawn(async move {
+            portal_net::send(&sender, peer, &src, &manifest, quiet()).await
+        });
+
+        let stranger = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let stolen = receive_with(&stranger, sender_addr.clone(), &tmp.path().join("x")).await;
+        assert!(stolen.is_err(), "{stolen:?}");
+        assert!(!tmp.path().join("x/f.txt").exists());
+
+        receive_with(&receiver, sender_addr, &tmp.path().join("y"))
+            .await
+            .unwrap();
+        send.await.unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("y/f.txt")).unwrap(),
+            "for the right receiver only"
+        );
     })
     .await
     .unwrap();

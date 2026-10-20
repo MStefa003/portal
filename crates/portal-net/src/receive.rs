@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iroh::Endpoint;
+use iroh::{Endpoint, EndpointAddr};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use portal_core::manifest::MAX_MANIFEST_BYTES;
 use portal_core::{Hash, Manifest, OverwritePolicy, Sink, SinkError, Summary};
@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 
 use crate::error::NetError;
 use crate::event::{Event, Reporter};
-use crate::{Ticket, endpoint, hang_up, hello};
+use crate::{endpoint, hang_up, hello};
 
 /// How long to wait for the sender to close after we said `Done`.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,17 +32,24 @@ pub struct ReceiveOptions {
     pub overwrite: OverwritePolicy,
 }
 
-/// Connects to the sender at `ticket` and receives its transfer.
+/// Connects to the sender at `sender` and receives its transfer.
 pub async fn receive(
     endpoint: &Endpoint,
-    ticket: &Ticket,
+    sender: EndpointAddr,
     options: ReceiveOptions,
     reporter: Reporter,
 ) -> Result<Summary, NetError> {
+    let expected = sender.id;
     let conn = endpoint
-        .connect(ticket.addr().clone(), ALPN)
+        .connect(sender, ALPN)
         .await
         .map_err(NetError::connect)?;
+    // iroh's TLS already authenticates the node ID we dialed; checked again
+    // because everything rests on it.
+    if conn.remote_id() != expected {
+        conn.close(2u32.into(), b"unexpected peer");
+        return Err(NetError::WrongPeer);
+    }
     reporter(Event::Connected {
         peer: conn.remote_id().fmt_short().to_string(),
         route: endpoint::route(&conn),

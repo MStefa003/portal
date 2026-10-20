@@ -14,8 +14,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
-use iroh::Endpoint;
+use iroh::{Endpoint, EndpointId};
 use iroh::endpoint::{Connection, SendStream};
 use portal_core::{Hash, Manifest, Source};
 use portal_proto::frame::{read_msg, write_msg};
@@ -30,27 +31,24 @@ use crate::{endpoint, hang_up, hello};
 /// Parallel data streams per transfer: enough to keep the pipe full while
 /// one worker waits on disk or compression.
 const DATA_STREAMS: usize = 4;
+/// How long the paired receiver has to connect (hole punching included).
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 type ControlResult = Result<Option<Control>, portal_proto::FrameError>;
 
-/// Waits for one receiver on `endpoint`, then sends it `manifest`'s content,
-/// read from `root` (the file or folder that was scanned).
+/// Waits for the receiver `peer` to connect to `endpoint`, then sends it
+/// `manifest`'s content, read from `root` (the file or folder that was
+/// scanned). Connections from any other node are refused.
 pub async fn send(
     endpoint: &Endpoint,
+    peer: EndpointId,
     root: &Path,
     manifest: &Manifest,
     reporter: Reporter,
 ) -> Result<(), NetError> {
-    let conn = loop {
-        let incoming = endpoint
-            .accept()
-            .await
-            .ok_or_else(|| NetError::Internal("the endpoint was closed".into()))?;
-        match incoming.await {
-            Ok(conn) => break conn,
-            Err(e) => tracing::warn!(%e, "an incoming connection failed; still waiting"),
-        }
-    };
+    let conn = tokio::time::timeout(ACCEPT_TIMEOUT, accept_from(endpoint, peer))
+        .await
+        .map_err(|_| NetError::Timeout("waiting for the receiver to connect"))??;
     reporter(Event::Connected {
         peer: conn.remote_id().fmt_short().to_string(),
         route: endpoint::route(&conn),
@@ -59,6 +57,24 @@ pub async fn send(
     let result = serve(&conn, root, manifest, &reporter).await;
     hang_up(&conn, &result).await;
     result
+}
+
+/// The first connection from `peer`; others are closed and ignored.
+async fn accept_from(endpoint: &Endpoint, peer: EndpointId) -> Result<Connection, NetError> {
+    loop {
+        let incoming = endpoint
+            .accept()
+            .await
+            .ok_or_else(|| NetError::Internal("the endpoint was closed".into()))?;
+        match incoming.await {
+            Ok(conn) if conn.remote_id() == peer => return Ok(conn),
+            Ok(conn) => {
+                tracing::warn!("refused a connection from a peer that did not use the code");
+                conn.close(2u32.into(), b"unexpected peer");
+            }
+            Err(e) => tracing::warn!(%e, "an incoming connection failed; still waiting"),
+        }
+    }
 }
 
 async fn serve(

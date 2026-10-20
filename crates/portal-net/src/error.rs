@@ -1,6 +1,8 @@
 use portal_core::manifest::ManifestError;
 use portal_core::{SinkError, SourceError};
-use portal_proto::{ChunkError, DeclineReason, ErrorCode, FrameError, VersionError};
+use portal_proto::{
+    ChunkError, DeclineReason, ErrorCode, FrameError, PakeError, RendezvousError, VersionError,
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
@@ -16,9 +18,30 @@ pub enum NetError {
     /// The QUIC connection or a stream failed.
     #[error("the connection failed")]
     Connection(#[source] BoxError),
-    /// The ticket could not be parsed.
-    #[error("the connection address is invalid; copy it again from the sender")]
-    InvalidTicket,
+    /// The rendezvous server URL is not a `ws://` or `wss://` URL.
+    #[error("the rendezvous server URL must start with ws:// or wss://")]
+    RendezvousUrl,
+    /// The rendezvous server could not be reached.
+    #[error("could not reach the rendezvous server")]
+    RendezvousConnect(#[source] BoxError),
+    /// The rendezvous server refused a request.
+    #[error(transparent)]
+    Rendezvous(RendezvousError),
+    /// The connection to the rendezvous server dropped.
+    #[error("lost the connection to the rendezvous server")]
+    RendezvousLost,
+    /// The other peer left the rendezvous before the handshake finished.
+    #[error("the other side disconnected before the handshake finished")]
+    PeerLeft,
+    /// The code handshake failed.
+    #[error(transparent)]
+    Pake(#[from] PakeError),
+    /// The peer that connected is not the one that proved it knows the code.
+    #[error("the connection came from an unexpected peer")]
+    WrongPeer,
+    /// A step took too long.
+    #[error("timed out: {0}")]
+    Timeout(&'static str),
     /// The peers have no protocol version in common.
     #[error(transparent)]
     Version(#[from] VersionError),

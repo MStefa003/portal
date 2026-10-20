@@ -1,9 +1,12 @@
 //! Networking for Portal: iroh/QUIC connections and the transfer protocol
 //! that moves a [`portal_core::Manifest`] and its chunks between two peers.
 //!
-//! - [`bind`] creates an iroh endpoint; [`Ticket`] encodes a peer's address.
-//! - [`send`] waits for one receiver and serves it.
-//! - [`receive`] connects to a sender and writes into a destination folder.
+//! - [`bind`] creates an iroh endpoint.
+//! - [`rendezvous`] turns a short code into the other peer's authenticated
+//!   identity: [`rendezvous::allocate`] + [`rendezvous::Waiting::pair`] on the
+//!   sender, [`rendezvous::join`] on the receiver.
+//! - [`send`] waits for that receiver and serves it.
+//! - [`receive`] connects to the sender and writes into a destination folder.
 //!
 //! Progress is reported through a [`Reporter`] callback so the CLI (and later
 //! the GUI) can render it however it likes.
@@ -13,12 +16,13 @@ mod endpoint;
 mod error;
 mod event;
 mod receive;
+pub mod rendezvous;
 mod send;
 
-pub use endpoint::{NetMode, Ticket, bind, local_ticket, route};
+pub use endpoint::{NetMode, bind, local_addr, route};
 pub use error::NetError;
 pub use event::{Event, Reporter, Route};
-pub use iroh::Endpoint;
+pub use iroh::{Endpoint, EndpointAddr, EndpointId};
 pub use receive::{ReceiveOptions, receive};
 pub use send::send;
 
