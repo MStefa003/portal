@@ -10,9 +10,19 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+portal-proto.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true

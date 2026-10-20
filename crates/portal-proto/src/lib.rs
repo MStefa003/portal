@@ -8,17 +8,27 @@
 //!
 //! Every message is a length-prefixed frame (see [`frame`]), and every length
 //! read from the network is checked against a hard cap before allocating.
+//!
+//! Before that, the peers find each other with a short [`Code`]: the
+//! [`rendezvous`] server pairs them by the code's number, and the [`pake`]
+//! handshake proves both know the code's words and exchanges their addresses.
 //! See `docs/PROTOCOL.md` for the full description.
 #![forbid(unsafe_code)]
 
 pub mod chunk;
+pub mod code;
 pub mod frame;
 pub mod message;
+pub mod pake;
+pub mod rendezvous;
 pub mod version;
 
 pub use chunk::{ChunkError, EncodedChunk, Encoding};
+pub use code::{Code, CodeError};
 pub use frame::FrameError;
 pub use message::{Control, DeclineReason, ErrorCode, Offer, sanitize};
+pub use pake::{PakeError, PeerMsg, Role};
+pub use rendezvous::{ClientMsg, RendezvousError, ServerMsg};
 pub use version::{VersionError, negotiate};
 
 /// Version of the peer-to-peer wire protocol spoken by this build.

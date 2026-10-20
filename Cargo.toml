@@ -14,19 +14,26 @@ authors = ["Marios Stefanidis"]
 portal-core = { path = "crates/portal-core" }
 portal-proto = { path = "crates/portal-proto" }
 portal-net = { path = "crates/portal-net" }
+portal-rendezvous = { path = "crates/portal-rendezvous" }
 
 anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 blake3 = "1.8.7"
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console = "0.16.6"
 fastcdc = "5.0.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+getrandom = "0.4.3"
 ignore = "0.4.33"
 indicatif = "0.18.6"
 iroh = "1.4.0"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 serde = { version = "1.0.229", features = ["derive"] }
+spake2 = "0.4.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zstd = "0.14.3"

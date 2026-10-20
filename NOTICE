@@ -1,0 +1,10 @@
+Portal
+Copyright (c) Marios Stefanidis and Portal contributors.
+Licensed under MIT OR Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE).
+
+This product includes the "EFF Short Wordlist #1" by the Electronic Frontier
+Foundation, https://www.eff.org/dice, licensed under the Creative Commons
+Attribution 3.0 United States License
+(https://creativecommons.org/licenses/by/3.0/us/).
+Changes: the dice numbers were removed and the word "yo-yo" was dropped.
+The modified list is crates/portal-proto/src/wordlist.txt.
