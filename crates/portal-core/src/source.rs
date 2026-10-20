@@ -1,0 +1,96 @@
+//! Serving chunks from disk (sender side).
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use crate::hash::Hash;
+use crate::manifest::Manifest;
+
+/// Why a chunk could not be served.
+#[derive(Debug, thiserror::Error)]
+pub enum SourceError {
+    /// The peer asked for a chunk that is not in the manifest.
+    #[error("the receiver asked for unknown chunk {0}")]
+    UnknownChunk(Hash),
+    /// The file no longer matches what was scanned.
+    #[error("`{}` changed while it was being sent", .0.display())]
+    Changed(PathBuf),
+    /// Reading the file failed.
+    #[error("could not read `{}`: {source}", path.display())]
+    Io {
+        /// The file being read.
+        path: PathBuf,
+        /// The underlying error.
+        source: io::Error,
+    },
+}
+
+struct Location {
+    file: usize,
+    offset: u64,
+    len: u32,
+}
+
+/// Reads chunks of a scanned file or folder by hash.
+///
+/// Each distinct chunk is mapped to one place it occurs, so a chunk that
+/// appears in several files (or several times in one) is only ever sent once.
+pub struct Source {
+    files: Vec<PathBuf>,
+    locations: HashMap<Hash, Location>,
+}
+
+impl Source {
+    /// Indexes `manifest`, which must have been scanned from `root`.
+    pub fn new(root: &Path, manifest: &Manifest) -> Self {
+        let mut files = Vec::new();
+        let mut locations = HashMap::new();
+        for (_, entry, meta) in manifest.files() {
+            // The first component is `root`'s own name.
+            let mut path = root.to_path_buf();
+            path.extend(entry.path.components().skip(1));
+            let file = files.len();
+            files.push(path);
+            let mut offset = 0u64;
+            for chunk in &meta.chunks {
+                locations.entry(chunk.hash).or_insert(Location {
+                    file,
+                    offset,
+                    len: chunk.len,
+                });
+                offset += u64::from(chunk.len);
+            }
+        }
+        Self { files, locations }
+    }
+
+    /// Reads one chunk and re-checks its hash, so a file that was modified
+    /// after scanning is reported instead of sending wrong data.
+    pub fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>, SourceError> {
+        let loc = self
+            .locations
+            .get(hash)
+            .ok_or(SourceError::UnknownChunk(*hash))?;
+        let path = &self.files[loc.file];
+        let io_err = |source| SourceError::Io {
+            path: path.clone(),
+            source,
+        };
+        let mut file = File::open(path).map_err(io_err)?;
+        file.seek(SeekFrom::Start(loc.offset)).map_err(io_err)?;
+        let mut buf = vec![0; loc.len as usize];
+        match file.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(SourceError::Changed(path.clone()));
+            }
+            Err(e) => return Err(io_err(e)),
+        }
+        if Hash::of(&buf) != *hash {
+            return Err(SourceError::Changed(path.clone()));
+        }
+        Ok(buf)
+    }
+}
