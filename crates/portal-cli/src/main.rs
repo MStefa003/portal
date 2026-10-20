@@ -7,16 +7,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, anyhow, bail};
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use console::style;
 use portal_core::{OverwritePolicy, ScanOptions, SinkError};
-use portal_net::{NetError, NetMode, ReceiveOptions, Ticket};
-use portal_proto::DeclineReason;
+use portal_net::{NetError, NetMode, ReceiveOptions};
+use portal_proto::{Code, DeclineReason, PakeError, RendezvousError};
 use tracing_subscriber::EnvFilter;
 
 use crate::ui::{Progress, Role, describe};
 
-/// Placeholder until the public rendezvous instance exists (M3).
+/// Placeholder until a public rendezvous instance exists; see
+/// docs/SELF_HOSTING.md. `.invalid` never resolves, so this fails clearly.
 const DEFAULT_RENDEZVOUS: &str = "wss://rendezvous.portal.invalid/v1";
 
 /// At most this many skipped entries are listed individually.
@@ -55,14 +56,9 @@ enum Command {
         rendezvous: String,
     },
     /// Receive a file or folder from a sender.
-    #[command(group(ArgGroup::new("from").required(true).args(["code", "addr"])))]
     Receive {
-        /// The code shown by the sender, e.g. 7-sunset-river (coming soon).
+        /// The code shown by the sender, e.g. 7-cedar-river. Asked for if omitted.
         code: Option<String>,
-
-        /// The address printed by `portal send`.
-        #[arg(long, value_name = "ADDRESS")]
-        addr: Option<String>,
 
         /// Folder to save into (defaults to the current directory).
         #[arg(short, long)]
@@ -92,15 +88,14 @@ async fn main() -> ExitCode {
         Command::Send {
             path,
             respect_gitignore,
-            rendezvous: _,
-        } => send(&path, respect_gitignore, mode).await,
+            rendezvous,
+        } => send(&path, respect_gitignore, &rendezvous, mode).await,
         Command::Receive {
             code,
-            addr,
             output,
             overwrite,
-            rendezvous: _,
-        } => receive(code, addr, output, overwrite, mode).await,
+            rendezvous,
+        } => receive(code, output, overwrite, &rendezvous, mode).await,
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -111,7 +106,12 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn send(path: &Path, respect_gitignore: bool, mode: NetMode) -> anyhow::Result<()> {
+async fn send(
+    path: &Path,
+    respect_gitignore: bool,
+    rendezvous: &str,
+    mode: NetMode,
+) -> anyhow::Result<()> {
     let options = ScanOptions { respect_gitignore };
     let to_scan = path.to_path_buf();
     let scan = tokio::task::spawn_blocking(move || portal_core::scan(&to_scan, &options))
@@ -143,39 +143,56 @@ async fn send(path: &Path, respect_gitignore: bool, mode: NetMode) -> anyhow::Re
     );
 
     let endpoint = portal_net::bind(mode, true).await?;
-    let ticket = portal_net::local_ticket(&endpoint, mode).await;
-    let loopback = if mode == NetMode::Loopback {
-        " --loopback"
-    } else {
-        ""
-    };
-    println!("\nOn the other machine, run:\n\n  portal receive{loopback} --addr {ticket}\n");
+    let waiting = portal_net::rendezvous::allocate(rendezvous)
+        .await
+        .map_err(|e| explain(e, rendezvous, Role::Send))?;
+    let code = waiting.code().to_string();
+    let mut flags = String::new();
+    if mode == NetMode::Loopback {
+        flags.push_str(" --loopback");
+    }
+    if rendezvous != DEFAULT_RENDEZVOUS {
+        flags.push_str(&format!(" --rendezvous {rendezvous}"));
+    }
+    println!("Code: {}", style(&code).bold().cyan());
+    println!("\nOn the other machine, run:\n\n  portal receive{flags} {code}\n");
     println!("Waiting for receiver...");
 
-    let progress = Progress::new();
-    let result = portal_net::send(&endpoint, path, manifest, progress.reporter(Role::Send)).await;
-    progress.finish();
+    let result = async {
+        let peer = waiting.pair(&endpoint, mode).await?;
+        let progress = Progress::new();
+        let result = portal_net::send(
+            &endpoint,
+            peer,
+            path,
+            manifest,
+            progress.reporter(Role::Send),
+        )
+        .await;
+        progress.finish();
+        result
+    }
+    .await;
     endpoint.close().await;
-    result.map_err(explain)?;
+    result.map_err(|e| explain(e, rendezvous, Role::Send))?;
     ui::success(format!("Sent {summary}"));
     Ok(())
 }
 
 async fn receive(
     code: Option<String>,
-    addr: Option<String>,
     output: Option<PathBuf>,
     overwrite: bool,
+    rendezvous: &str,
     mode: NetMode,
 ) -> anyhow::Result<()> {
-    let Some(addr) = addr else {
-        // Deliberately not echoing the code back.
-        let _ = code;
-        bail!(
-            "short codes are not supported yet. Ask the sender for the --addr value that `portal send` printed."
-        );
+    let typed = match code {
+        Some(code) => code,
+        None => ask_for_code()?,
     };
-    let ticket: Ticket = addr.parse()?;
+    // Parse before touching the network: a typo caught here does not use up
+    // the sender's one attempt.
+    let code = Code::parse(&typed)?;
     let dest = match output {
         Some(dir) => dir,
         None => std::env::current_dir().context("could not determine the current folder")?,
@@ -183,7 +200,6 @@ async fn receive(
 
     let endpoint = portal_net::bind(mode, false).await?;
     println!("Connecting...");
-    let progress = Progress::new();
     let options = ReceiveOptions {
         dest: dest.clone(),
         overwrite: if overwrite {
@@ -192,16 +208,17 @@ async fn receive(
             OverwritePolicy::Never
         },
     };
-    let result = portal_net::receive(
-        &endpoint,
-        &ticket,
-        options,
-        progress.reporter(Role::Receive),
-    )
+    let result = async {
+        let sender = portal_net::rendezvous::join(rendezvous, &code, &endpoint).await?;
+        let progress = Progress::new();
+        let result =
+            portal_net::receive(&endpoint, sender, options, progress.reporter(Role::Receive)).await;
+        progress.finish();
+        result
+    }
     .await;
-    progress.finish();
     endpoint.close().await;
-    let summary = result.map_err(explain)?;
+    let summary = result.map_err(|e| explain(e, rendezvous, Role::Receive))?;
     ui::success(format!(
         "Received {} into {}",
         describe(summary.files, summary.bytes, false),
@@ -210,9 +227,34 @@ async fn receive(
     Ok(())
 }
 
+/// Reads the code from the terminal when it was not given as an argument.
+fn ask_for_code() -> anyhow::Result<String> {
+    let term = console::Term::stderr();
+    if !term.is_term() {
+        bail!("no code given. Usage: portal receive <CODE>");
+    }
+    term.write_str("Enter the code shown by the sender: ")?;
+    Ok(term.read_line()?)
+}
+
 /// Turns library errors into advice a user can act on.
-fn explain(e: NetError) -> anyhow::Error {
+fn explain(e: NetError, rendezvous: &str, role: Role) -> anyhow::Error {
     match e {
+        NetError::Pake(PakeError::WrongCode) if role == Role::Send => anyhow!(
+            "someone tried to connect with a wrong code, so the transfer was cancelled to keep your files safe. Run `portal send` again for a new code."
+        ),
+        NetError::Pake(PakeError::WrongCode) => anyhow!(
+            "the code is wrong. Each code allows one try, so ask the sender to run `portal send` again and type the new code carefully."
+        ),
+        NetError::Rendezvous(RendezvousError::UnknownNameplate) => anyhow!(
+            "no sender is waiting for this code. Check the number at the start, and that `portal send` is still running."
+        ),
+        NetError::RendezvousConnect(_) if rendezvous == DEFAULT_RENDEZVOUS => anyhow!(
+            "there is no public rendezvous server yet. Run `portal-rendezvous` yourself (see docs/SELF_HOSTING.md) and pass --rendezvous ws://<host>:8080/v1, or set PORTAL_RENDEZVOUS."
+        ),
+        NetError::RendezvousConnect(_) => anyhow::Error::new(e).context(format!(
+            "Could not reach the rendezvous server at {rendezvous}"
+        )),
         NetError::Sink(SinkError::Conflicts(_)) => anyhow!(
             "{e}. Use --overwrite to replace existing files, or --output to receive into another folder."
         ),
@@ -220,7 +262,7 @@ fn explain(e: NetError) -> anyhow::Error {
             "the receiver already has files with these names. They can re-run with --overwrite or --output."
         ),
         NetError::Connect(_) => anyhow::Error::new(e).context(
-            "Could not reach the sender. Check that `portal send` is still running and that the whole address was copied",
+            "Could not reach the sender. Check that `portal send` is still running and that neither network blocks UDP",
         ),
         other => other.into(),
     }

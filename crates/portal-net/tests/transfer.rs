@@ -435,9 +435,10 @@ async fn sender_only_accepts_the_paired_receiver() {
         let sender_addr = portal_net::local_addr(&sender, NetMode::Loopback).await;
         let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
         let peer = receiver.id();
-        let send = tokio::spawn(async move {
-            portal_net::send(&sender, peer, &src, &manifest, quiet()).await
-        });
+        let send =
+            tokio::spawn(
+                async move { portal_net::send(&sender, peer, &src, &manifest, quiet()).await },
+            );
 
         let stranger = portal_net::bind(NetMode::Loopback, false).await.unwrap();
         let stolen = receive_with(&stranger, sender_addr.clone(), &tmp.path().join("x")).await;

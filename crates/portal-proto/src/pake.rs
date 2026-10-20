@@ -179,8 +179,14 @@ mod tests {
     #[test]
     fn same_code_opens_both_ways() {
         let ((s_seal, s_open), (r_seal, r_open)) = handshake("7-cedar-river", "7-cedar-river");
-        assert_eq!(r_open.open(s_seal.seal(b"sender addr")).unwrap(), b"sender addr");
-        assert_eq!(s_open.open(r_seal.seal(b"receiver id")).unwrap(), b"receiver id");
+        assert_eq!(
+            r_open.open(s_seal.seal(b"sender addr")).unwrap(),
+            b"sender addr"
+        );
+        assert_eq!(
+            s_open.open(r_seal.seal(b"receiver id")).unwrap(),
+            b"receiver id"
+        );
     }
 
     #[test]
@@ -212,7 +218,10 @@ mod tests {
             unreachable!()
         };
         bytes[0] ^= 1;
-        assert_eq!(r_open.open(PeerMsg::Sealed(bytes)), Err(PakeError::WrongCode));
+        assert_eq!(
+            r_open.open(PeerMsg::Sealed(bytes)),
+            Err(PakeError::WrongCode)
+        );
     }
 
     #[test]
@@ -223,10 +232,15 @@ mod tests {
             min_version: MIN_PROTOCOL_VERSION,
             msg: vec![1, 2, 3],
         };
-        assert_eq!(state.finish(junk, Role::Sender).unwrap_err(), PakeError::Malformed);
+        assert_eq!(
+            state.finish(junk, Role::Sender).unwrap_err(),
+            PakeError::Malformed
+        );
         let (state, _) = start(&Code::parse("7-cedar-river").unwrap());
         assert_eq!(
-            state.finish(PeerMsg::Sealed(vec![]), Role::Sender).unwrap_err(),
+            state
+                .finish(PeerMsg::Sealed(vec![]), Role::Sender)
+                .unwrap_err(),
             PakeError::Malformed
         );
     }

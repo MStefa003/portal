@@ -49,7 +49,10 @@ async fn connect(url: &str) -> Ws {
         },
     )
     .await;
-    assert!(matches!(recv(&mut ws).await, Some(ServerMsg::Welcome { .. })));
+    assert!(matches!(
+        recv(&mut ws).await,
+        Some(ServerMsg::Welcome { .. })
+    ));
     ws
 }
 

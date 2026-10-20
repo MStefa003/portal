@@ -16,8 +16,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iroh::{Endpoint, EndpointId};
 use iroh::endpoint::{Connection, SendStream};
+use iroh::{Endpoint, EndpointId};
 use portal_core::{Hash, Manifest, Source};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{Control, EncodedChunk, MANIFEST_PART_SIZE, MAX_CONTROL_FRAME, Offer, sanitize};

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iroh::{Endpoint, EndpointAddr};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::{Endpoint, EndpointAddr};
 use portal_core::manifest::MAX_MANIFEST_BYTES;
 use portal_core::{Hash, Manifest, OverwritePolicy, Sink, SinkError, Summary};
 use portal_proto::frame::{read_msg, write_msg};

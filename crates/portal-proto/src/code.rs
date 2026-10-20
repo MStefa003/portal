@@ -86,7 +86,9 @@ impl Code {
             .split(|c: char| c == '-' || c.is_whitespace())
             .filter(|p| !p.is_empty());
         let nameplate = parts.next().ok_or(CodeError::Format)?;
-        if nameplate.is_empty() || nameplate.len() > 7 || !nameplate.bytes().all(|b| b.is_ascii_digit())
+        if nameplate.is_empty()
+            || nameplate.len() > 7
+            || !nameplate.bytes().all(|b| b.is_ascii_digit())
         {
             return Err(CodeError::Nameplate);
         }
@@ -207,15 +209,21 @@ mod tests {
 
     #[test]
     fn generated_codes_vary() {
-        let codes: std::collections::HashSet<String> =
-            (0..50).map(|_| Code::generate(1).unwrap().to_string()).collect();
+        let codes: std::collections::HashSet<String> = (0..50)
+            .map(|_| Code::generate(1).unwrap().to_string())
+            .collect();
         assert!(codes.len() > 40);
     }
 
     #[test]
     fn parsing_is_forgiving_about_case_and_separators() {
         let want = Code::parse("7-cedar-river").unwrap();
-        for typed in ["7-cedar-river", " 7-Cedar-RIVER\n", "7 cedar river", "7--cedar - river"] {
+        for typed in [
+            "7-cedar-river",
+            " 7-Cedar-RIVER\n",
+            "7 cedar river",
+            "7--cedar - river",
+        ] {
             assert_eq!(Code::parse(typed).unwrap(), want, "{typed:?}");
         }
         assert_eq!(want.to_string(), "7-cedar-river");
@@ -256,14 +264,23 @@ mod tests {
         );
         assert!(err.to_string().contains("did you mean \"river\""));
         let err = Code::parse("7-cedar-qqqqqqqq").unwrap_err();
-        assert!(matches!(err, CodeError::UnknownWord { suggestion: None, .. }));
+        assert!(matches!(
+            err,
+            CodeError::UnknownWord {
+                suggestion: None,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn debug_hides_the_words() {
         let code = Code::parse("7-cedar-river").unwrap();
         let shown = format!("{code:?}");
-        assert!(!shown.contains("cedar") && !shown.contains("river"), "{shown}");
+        assert!(
+            !shown.contains("cedar") && !shown.contains("river"),
+            "{shown}"
+        );
     }
 
     #[test]

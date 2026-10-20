@@ -72,7 +72,11 @@ impl Waiting {
 
     /// Waits until a receiver joins and proves it knows the code, then
     /// returns its node ID. A wrong code ends the attempt: the code is used up.
-    pub async fn pair(mut self, endpoint: &Endpoint, mode: NetMode) -> Result<EndpointId, NetError> {
+    pub async fn pair(
+        mut self,
+        endpoint: &Endpoint,
+        mode: NetMode,
+    ) -> Result<EndpointId, NetError> {
         match recv(&mut self.ws).await? {
             ServerMsg::Paired => {}
             _ => return Err(NetError::Protocol("expected Paired".into())),
@@ -117,8 +121,8 @@ pub async fn join(url: &str, code: &Code, endpoint: &Endpoint) -> Result<Endpoin
 
     let result = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         let (sealer, opener) = exchange_pake(&mut ws, code, Role::Receiver).await?;
-        let me = postcard::to_allocvec(&endpoint.id())
-            .map_err(|e| NetError::Internal(e.to_string()))?;
+        let me =
+            postcard::to_allocvec(&endpoint.id()).map_err(|e| NetError::Internal(e.to_string()))?;
         relay(&mut ws, &sealer.seal(&me)).await?;
         let theirs = opener.open(recv_peer(&mut ws).await?)?;
         postcard::from_bytes::<EndpointAddr>(&theirs)
@@ -218,8 +222,9 @@ async fn relay(ws: &mut Ws, msg: &PeerMsg) -> Result<(), NetError> {
 /// The next message from the peer.
 async fn recv_peer(ws: &mut Ws) -> Result<PeerMsg, NetError> {
     match recv(ws).await? {
-        ServerMsg::Relay(bytes) => postcard::from_bytes(&bytes)
-            .map_err(|_| NetError::Pake(PakeError::Malformed)),
+        ServerMsg::Relay(bytes) => {
+            postcard::from_bytes(&bytes).map_err(|_| NetError::Pake(PakeError::Malformed))
+        }
         _ => Err(NetError::Protocol("expected a relayed message".into())),
     }
 }
