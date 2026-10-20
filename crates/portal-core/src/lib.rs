@@ -13,6 +13,7 @@
 //! whole pipeline can be tested in a single process between two folders.
 #![forbid(unsafe_code)]
 
+pub mod chunk;
 pub mod hash;
 pub mod path;
 
