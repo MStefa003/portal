@@ -1,0 +1,18 @@
+[package]
+name = "portal-rendezvous"
+description = "Self-hostable rendezvous server that lets two Portal peers find each other"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "portal-cli"
+description = "Secure peer-to-peer file and folder transfer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["file-transfer", "p2p", "encryption", "cli"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "portal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+portal-core.workspace = true
+portal-net.workspace = true
+portal-proto.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
