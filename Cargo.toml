@@ -18,13 +18,18 @@ portal-net = { path = "crates/portal-net" }
 anyhow = "1.0.104"
 blake3 = "1.8.7"
 clap = { version = "4.6.7", features = ["derive", "env"] }
+console = "0.16.6"
 fastcdc = "5.0.0"
 ignore = "0.4.33"
+indicatif = "0.18.6"
+iroh = "1.4.0"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zstd = "0.14.3"
 
 # Test-only.
 proptest = "1.12.0"
