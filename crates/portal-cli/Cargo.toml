@@ -18,11 +18,17 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+console.workspace = true
+indicatif.workspace = true
 portal-core.workspace = true
 portal-net.workspace = true
 portal-proto.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
