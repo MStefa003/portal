@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marios-stefanidis/portal"
+authors = ["Marios Stefanidis"]
+
+[workspace.dependencies]
+portal-core = { path = "crates/portal-core" }
+portal-proto = { path = "crates/portal-proto" }
+portal-net = { path = "crates/portal-net" }
+
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
