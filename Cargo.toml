@@ -45,6 +45,14 @@ expect_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 
+# Full debug info for ~300 dependencies across every test binary costs many
+# GB in target/. Keep line numbers for our own backtraces, none for deps.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
