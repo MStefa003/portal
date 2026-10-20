@@ -48,8 +48,36 @@ portal-rendezvous ──► portal-proto
                                           sink.finish()
 ```
 
-In M1 the "bytes" arrows are function calls in one process
-(`crates/portal-core/tests/local_transfer.rs`); from M2 they are QUIC streams.
+In M1 the "bytes" arrows were function calls in one process
+(`crates/portal-core/tests/local_transfer.rs`). Since M2 they are QUIC streams
+(`crates/portal-net`).
+
+### Concurrency on the wire (M2)
+
+```
+sender                                     receiver
+──────                                     ────────
+control reader task ─► channel ─┐          control: Want batches, then WantDone
+                                ▼
+          select! { control msg | worker finished }
+Want hashes ─► queue ─► worker ×4 ─ data stream ─► reader task per stream
+                 read file (blocking pool)          decompress (blocking pool)
+                 zstd if smaller                          │ bounded channel (64)
+                                                          ▼
+                                               writer thread owns the Sink:
+                                               verify, write, finalize files
+```
+
+- **The receiver drives the transfer.** It decides what it needs (`Want`), so
+  dedup and resume (M4) need no changes on the sender side.
+- **Frame reads are not cancel-safe.** Dropping a half-read frame would leave
+  the stream mid-frame. So every stream is read by its own task, and `select!`
+  only ever waits on channels and `JoinSet`s.
+- **One writer thread.** The `Sink` does blocking file I/O and keeps state, so
+  one thread owns it. The bounded channel feeding it applies backpressure all
+  the way back to the sender through QUIC flow control.
+- **`JoinSet`s abort their tasks on drop.** Whichever way a transfer ends, no
+  background task is left running.
 
 ### Chunking and deduplication
 

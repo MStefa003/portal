@@ -2,8 +2,9 @@
 
 Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
 
-> Status: draft. Message types are specified as they are implemented
-> (M1–M3). Until the first release the protocol may change without notice.
+> Status: draft. The manifest (M1) and the peer protocol (M2) are specified
+> below; the rendezvous and handshake layers follow in M3. Until the first
+> release the protocol may change without notice.
 
 ## Conventions
 
@@ -84,3 +85,73 @@ component is at most 255 bytes, and:
 
 These rules apply on every OS, so a manifest valid anywhere can be written
 anywhere. Senders skip (and report) entries that do not satisfy them.
+
+## Peer protocol (version 1)
+
+One QUIC connection over iroh, ALPN `portal/1`. The receiver dials the
+sender. iroh authenticates both ends by their node keys (TLS with raw
+public keys), so the receiver knows it reached the node ID it dialed.
+
+### Streams
+
+- **Control stream**: one bidirectional stream, opened by the receiver.
+  Frames are `u32 LE length` + postcard `Control`, at most **1 MiB** each.
+- **Data streams**: unidirectional, opened by the sender (currently 4, lazily).
+  Each carries a sequence of chunks:
+  `u32 LE header length` + postcard `ChunkHeader { hash, encoding, raw_len, wire_len }`
+  + `wire_len` payload bytes. Header at most 64 bytes; `raw_len` and
+  `wire_len` at most 1 MiB. A clean end of stream ends the sequence.
+
+### Control messages
+
+| # | Message | Direction | Meaning |
+|---|---|---|---|
+| 0 | `Hello { version, min_version }` | both, first | supported versions |
+| 1 | `Offer { name, files, bytes, manifest_len, transfer_id }` | S→R | what is coming |
+| 2 | `ManifestPart(bytes)` | S→R | next piece of the manifest (512 KiB pieces) |
+| 3 | `Accept` | R→S | go ahead |
+| 4 | `Decline(reason)` | R→S | refused: `Rejected`, `Conflicts`, `Destination` |
+| 5 | `Want([hash])` | R→S | send these chunks (up to 8,192 per message) |
+| 6 | `WantDone` | R→S | no more `Want`s |
+| 7 | `Done` | R→S | everything received and verified |
+| 8 | `Error { code, message }` | both | failure; `message` is untrusted text |
+
+The numbers are postcard variant indices. **`Hello` stays variant 0
+forever**, so any two versions can read each other's `Hello` and fail with a
+clear version message. New variants are only appended.
+
+### Sequence
+
+```text
+receiver                                  sender
+   │── open control stream, Hello ───────►│
+   │◄──────────────────────────── Hello ──│   both: negotiate() or fail
+   │◄──────────────────────────── Offer ──│
+   │◄──────────────── ManifestPart × n ───│
+   │── Accept | Decline ─────────────────►│
+   │── Want × n ─────────────────────────►│
+   │── WantDone ─────────────────────────►│
+   │◄════════════ chunks on data streams ═│
+   │── Done ─────────────────────────────►│
+   │◄─────────────────────── close(0) ────│
+```
+
+**Version negotiation.** Each side sends `Hello` and reads the peer's. A peer
+is compatible if `peer.version >= our min` and `peer.min_version <= our
+version`; both then use `min(our version, peer.version)`.
+
+**Receiver checks.** It refuses the manifest unless all of these hold:
+`manifest_len` is at most 256 MiB, every part is non-empty, the parts add up
+to exactly `manifest_len`, `BLAKE3(manifest) == transfer_id`, the manifest
+passes validation, and the `name`, `files` and `bytes` in the offer match it.
+Each chunk is decompressed with an output cap of `raw_len` (at most 1 MiB),
+then checked against its hash before it is written.
+
+**Compression.** `Zstd` is used only when it makes the chunk smaller;
+otherwise `Raw`. Level 3.
+
+**Errors and closing.** When a side detects an error, it sends `Error` with a
+generic message. Local paths and details are never sent. It then waits up to
+3 s for the peer to close the connection. The side that receives an `Error`
+or `Decline` closes right away. This order matters because closing a QUIC
+connection discards data still in flight. Close codes: `0` success, `1` error.

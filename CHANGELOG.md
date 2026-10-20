@@ -7,6 +7,17 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- M2: direct transfers over iroh (QUIC, hole punching, relay fallback):
+  - `portal send <path>` prints an address; `portal receive --addr <address>`
+    downloads into the current folder (or `--output`), with `--overwrite`.
+  - `portal-proto`: versioned control messages, length-prefixed frames with
+    hard size caps, zstd chunk frames (compressed only when smaller,
+    decompression capped).
+  - `portal-net`: receiver-driven transfer, 4 parallel data streams, a single
+    writer thread on the receiver, generic error reporting to the peer.
+  - Progress bar with speed and ETA; `[direct]` / `[relay]` route display.
+  - Tests with real endpoints over loopback, a malicious sender (corrupted
+    chunk, incompatible version), and two real `portal` processes.
 - M1: local transfer core in `portal-core`:
   - `SafeRelPath`: portable, traversal-proof relative paths (rejects `..`,
     absolute paths, drive letters, UNC, alternate data streams, reserved

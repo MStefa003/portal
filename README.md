@@ -15,7 +15,28 @@ Receiving "project" (1,284 files, 2.3 GB) from 192.168.1.20 [direct]
 [████████████░░░░░░░░] 61%  48 MB/s  ETA 0:19
 ```
 
-> **Status:** early development (milestone M1). The transfer core works in-process; networking comes in M2.
+> **Status:** early development (milestone M2). Transfers work between two
+> machines using a long address; short codes like `7-sunset-river` come in M3.
+
+## Try it (M2)
+
+```console
+# Machine A
+$ portal send ./project
+Sending "project" (2 files, 2.00 MB)
+
+On the other machine, run:
+
+  portal receive --addr cd564b70a3…
+
+# Machine B
+$ portal receive --addr cd564b70a3…
+Receiving "project" (2 files, 2.00 MB) from 192.168.2.9 [direct]
+✓ Received 2 files, 2.00 MB into C:\Users\you\Downloads
+```
+
+Until M3 adds the authenticated short-code handshake, anyone who has the
+address can connect, so only share it over a channel you trust.
 
 ## Goals
 
