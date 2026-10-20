@@ -15,7 +15,11 @@
 
 pub mod chunk;
 pub mod hash;
+pub mod manifest;
 pub mod path;
+pub mod scan;
 
 pub use hash::Hash;
+pub use manifest::Manifest;
 pub use path::SafeRelPath;
+pub use scan::{Scan, ScanOptions, scan};
