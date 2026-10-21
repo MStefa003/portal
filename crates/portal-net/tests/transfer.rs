@@ -95,6 +95,22 @@ async fn run_transfer(
     Result<portal_core::Summary, NetError>,
     Vec<Event>,
 ) {
+    let options = ReceiveOptions {
+        dest: dest.to_path_buf(),
+        overwrite,
+        confirm: None,
+    };
+    run_transfer_with(src, options).await
+}
+
+async fn run_transfer_with(
+    src: &Path,
+    options: ReceiveOptions,
+) -> (
+    Result<(), NetError>,
+    Result<portal_core::Summary, NetError>,
+    Vec<Event>,
+) {
     let url = rendezvous().await;
     let scan = scan(src, &ScanOptions::default()).unwrap();
     let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
@@ -112,10 +128,6 @@ async fn run_transfer(
 
     let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
     let (reporter, events) = recording();
-    let options = ReceiveOptions {
-        dest: dest.to_path_buf(),
-        overwrite,
-    };
     let addr = portal_net::rendezvous::join(&url, &code, &receiver)
         .await
         .unwrap();
@@ -124,6 +136,70 @@ async fn run_transfer(
     let sent = send.await.unwrap();
     let events = events.lock().unwrap().clone();
     (sent, received, events)
+}
+
+/// Saying no to the offer tells the sender and writes nothing.
+#[tokio::test]
+async fn receiver_can_decline_the_offer() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a/project");
+        let dest = tmp.path().join("b");
+        make_project(&src);
+
+        let asked = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        let options = ReceiveOptions {
+            dest: dest.clone(),
+            overwrite: OverwritePolicy::Never,
+            confirm: Some(Arc::new(move |offer: &Offer| {
+                *seen.lock().unwrap() = Some(offer.name.clone());
+                false
+            })),
+        };
+        let (sent, received, _) = run_transfer_with(&src, options).await;
+        assert!(matches!(
+            sent,
+            Err(NetError::Declined(DeclineReason::Rejected))
+        ));
+        assert!(matches!(received, Err(NetError::Cancelled)));
+        assert_eq!(asked.lock().unwrap().as_deref(), Some("project"));
+        assert!(!dest.exists(), "nothing is written after saying no");
+    })
+    .await
+    .unwrap();
+}
+
+/// A transfer whose first attempt was cut off only sends what is missing.
+#[tokio::test]
+async fn resends_only_what_is_missing() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("a/project");
+        let dest = tmp.path().join("b");
+        make_project(&src);
+
+        let (sent, received, _) = run_transfer(&src, &dest, OverwritePolicy::Never).await;
+        sent.unwrap();
+        received.unwrap();
+        // Lose one file, as if the first attempt stopped just before it.
+        fs::remove_file(dest.join("project/README.md")).unwrap();
+
+        let (sent, received, events) = run_transfer(&src, &dest, OverwritePolicy::Never).await;
+        sent.unwrap();
+        received.unwrap();
+        same_tree(&src, &dest.join("project"));
+        let total = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Started { total_bytes, .. } => Some(*total_bytes),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(total, "hello\r\n".repeat(1000).len() as u64);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -304,6 +380,7 @@ async fn receive_with(
     let options = ReceiveOptions {
         dest: dest.to_path_buf(),
         overwrite: OverwritePolicy::Never,
+        confirm: None,
     };
     portal_net::receive(endpoint, addr, options, quiet()).await
 }

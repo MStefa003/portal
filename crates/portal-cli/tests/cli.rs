@@ -32,6 +32,45 @@ fn receive_requires_a_code() {
     assert!(stderr.contains("no code given"), "{stderr}");
 }
 
+#[test]
+fn prints_shell_completions() {
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let out = portal().args(["completions", shell]).output().unwrap();
+        assert!(out.status.success(), "{shell}");
+        let script = String::from_utf8(out.stdout).unwrap();
+        assert!(script.contains("receive"), "{shell}: {script}");
+    }
+}
+
+/// `portal dir` saves a folder, shows it, and forgets it again.
+#[test]
+fn dir_sets_shows_and_resets_the_download_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    let downloads = tmp.path().join("downloads");
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = portal()
+            .arg("dir")
+            .args(args)
+            .env("PORTAL_CONFIG_DIR", &config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    assert!(run(&[]).contains("Not set"));
+    run(&[downloads.as_os_str()]);
+    assert!(downloads.is_dir(), "the folder is created when set");
+    assert_eq!(run(&[]).trim(), downloads.display().to_string());
+    run(&["--reset".as_ref()]);
+    assert!(run(&[]).contains("Not set"));
+}
+
 /// Starts a rendezvous server on a background runtime; returns its URL.
 fn rendezvous() -> String {
     let (tx, rx) = std::sync::mpsc::channel();

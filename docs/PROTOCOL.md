@@ -202,7 +202,11 @@ index (`Dir` = 0, `File` = 1).
 
 **Transfer id.** `BLAKE3(encoded manifest)`. Identical input produces an
 identical id, which is how a receiver finds the resume state of an earlier
-attempt (M4).
+attempt: the partial files under `.portal-partial/<first 16 bytes of the id
+in hex>/`. On a new attempt it re-hashes every chunk found there and only
+`Want`s the ones that are missing or damaged, and it does not `Want` files
+that already exist at their target with the manifest's hash. The sender
+needs nothing for this: it serves whatever is asked for.
 
 **Hashes.** All hashes are BLAKE3-256. `FileMeta.hash` covers the whole file;
 `ChunkRef.hash` covers one chunk.

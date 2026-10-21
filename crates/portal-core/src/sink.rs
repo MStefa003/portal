@@ -12,15 +12,20 @@
 //!    the manifest, and only then atomically renamed into place.
 //!
 //! A corrupted transfer therefore never produces a file at its final path.
+//!
+//! An interrupted transfer leaves its partial folder behind. Receiving the
+//! same manifest again (same transfer id) picks it up: every chunk already in
+//! a partial file is re-hashed and kept if it matches. Files that already
+//! exist at their target with the right content are skipped, not conflicts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::chunk::MAX_CHUNK_SIZE;
 use crate::hash::Hash;
-use crate::manifest::{EntryKind, FileMeta, Manifest, ManifestError};
+use crate::manifest::{Entry, EntryKind, FileMeta, Manifest, ManifestError};
 use crate::path::{PARTIAL_DIR_NAME, SafeRelPath};
 
 /// What to do when a file already exists at a target path.
@@ -120,6 +125,8 @@ pub struct Sink {
     order: Vec<Hash>,
     wanted: HashMap<Hash, Wanted>,
     progress: HashMap<usize, FileProgress>,
+    /// Files already at their target with the right content.
+    present: HashSet<usize>,
     /// The most recently written partial file, kept open because chunks are
     /// usually requested in file order.
     open: Option<(usize, File)>,
@@ -145,7 +152,17 @@ impl Sink {
             Err(e) => return Err(io_err(dest)(e)),
         }
 
-        let conflicts = find_conflicts(dest, &manifest)?;
+        let mut present = HashSet::new();
+        let mut conflicts = Vec::new();
+        for (index, entry) in manifest.entries.iter().enumerate() {
+            match check_target(dest, entry)? {
+                Target::Missing => {}
+                Target::Identical => {
+                    present.insert(index);
+                }
+                Target::Different => conflicts.push(entry.path.clone()),
+            }
+        }
         if !conflicts.is_empty() && overwrite == OverwritePolicy::Never {
             return Err(SinkError::Conflicts(conflicts));
         }
@@ -158,6 +175,9 @@ impl Sink {
         let mut wanted: HashMap<Hash, Wanted> = HashMap::new();
         let mut progress = HashMap::new();
         for (index, _, file) in manifest.files() {
+            if present.contains(&index) {
+                continue;
+            }
             let mut offset = 0u64;
             for chunk in &file.chunks {
                 let w = wanted.entry(chunk.hash).or_insert_with(|| {
@@ -182,7 +202,7 @@ impl Sink {
             );
         }
 
-        Ok(Self {
+        let mut sink = Self {
             dest: dest.to_path_buf(),
             partial_dir,
             manifest,
@@ -190,8 +210,52 @@ impl Sink {
             order,
             wanted,
             progress,
+            present,
             open: None,
-        })
+        };
+        sink.resume()?;
+        Ok(sink)
+    }
+
+    /// Keeps every chunk an earlier attempt already wrote to a partial file.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        let files: Vec<(usize, FileMeta)> = self
+            .manifest
+            .files()
+            .filter(|(index, _, file)| !self.present.contains(index) && !file.chunks.is_empty())
+            .map(|(index, _, file)| (index, file.clone()))
+            .collect();
+        let mut done = Vec::new();
+        let mut buf = Vec::new();
+        for (entry, file) in files {
+            let path = self.partial_path(entry);
+            let mut partial = match File::open(&path) {
+                Ok(f) => BufReader::new(f),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(io_err(&path)(e)),
+            };
+            let mut offset = 0u64;
+            for chunk in &file.chunks {
+                buf.resize(chunk.len as usize, 0);
+                // A short file just means the rest was never written.
+                if partial.read_exact(&mut buf).is_err() {
+                    break;
+                }
+                if Hash::of(&buf) == chunk.hash {
+                    done.extend(self.fill(&chunk.hash, &buf, Some((entry, offset)))?);
+                }
+                offset += u64::from(chunk.len);
+            }
+            if let Some(p) = self.progress.get_mut(&entry) {
+                // Its length was already set by the earlier attempt.
+                p.created = true;
+            }
+        }
+        // Only now: Windows cannot rename partial files that are still open.
+        for entry in done {
+            self.finish_file(entry)?;
+        }
+        Ok(())
     }
 
     /// The manifest being received.
@@ -228,24 +292,40 @@ impl Sink {
         if Hash::of(data) != *hash {
             return Err(SinkError::CorruptChunk(*hash));
         }
-        let wanted = self
-            .wanted
-            .remove(hash)
-            .ok_or(SinkError::UnexpectedChunk(*hash))?;
-        for slot in &wanted.slots {
-            self.write_at(slot.entry, slot.offset, data)?;
-            let done = match self.progress.get_mut(&slot.entry) {
-                Some(p) => {
-                    p.missing_slots -= 1;
-                    p.missing_slots == 0
-                }
-                None => false,
-            };
-            if done {
-                self.finish_file(slot.entry)?;
-            }
+        if !self.wanted.contains_key(hash) {
+            return Err(SinkError::UnexpectedChunk(*hash));
+        }
+        for entry in self.fill(hash, data, None)? {
+            self.finish_file(entry)?;
         }
         Ok(())
+    }
+
+    /// Writes a verified chunk to every slot that still needs it, except
+    /// `on_disk` (an `(entry, offset)` that already holds it), and returns the
+    /// files this completed.
+    fn fill(
+        &mut self,
+        hash: &Hash,
+        data: &[u8],
+        on_disk: Option<(usize, u64)>,
+    ) -> Result<Vec<usize>, SinkError> {
+        let Some(wanted) = self.wanted.remove(hash) else {
+            return Ok(Vec::new());
+        };
+        let mut done = Vec::new();
+        for slot in &wanted.slots {
+            if on_disk != Some((slot.entry, slot.offset)) {
+                self.write_at(slot.entry, slot.offset, data)?;
+            }
+            if let Some(p) = self.progress.get_mut(&slot.entry) {
+                p.missing_slots -= 1;
+                if p.missing_slots == 0 {
+                    done.push(slot.entry);
+                }
+            }
+        }
+        Ok(done)
     }
 
     /// Creates directories and empty files, then removes the partial folder.
@@ -264,7 +344,9 @@ impl Sink {
                     let path = entry.path.to_path(&self.dest);
                     fs::create_dir_all(&path).map_err(io_err(&path))?;
                 }
-                EntryKind::File(f) if f.chunks.is_empty() => empty_files.push(index),
+                EntryKind::File(f) if f.chunks.is_empty() && !self.present.contains(&index) => {
+                    empty_files.push(index);
+                }
                 EntryKind::File(_) => {}
             }
         }
@@ -344,9 +426,7 @@ impl Sink {
             .write(true)
             .open(&partial)
             .map_err(io_err(&partial))?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update_reader(&file).map_err(io_err(&partial))?;
-        if Hash::from(hasher.finalize()) != meta.hash {
+        if hash_file(&file).map_err(io_err(&partial))? != meta.hash {
             return Err(SinkError::CorruptFile(rel));
         }
         if let Some(mtime) = meta.mtime.and_then(|t| t.to_system_time()) {
@@ -380,25 +460,60 @@ impl Sink {
 ///
 /// Errors (instead of listing) for problems overwriting cannot fix: symbolic
 /// links at target paths and file/folder mismatches.
+/// Files that already exist with exactly the sender's content are not
+/// conflicts: there is nothing to overwrite.
 pub fn find_conflicts(dest: &Path, manifest: &Manifest) -> Result<Vec<SafeRelPath>, SinkError> {
     let mut conflicts = Vec::new();
     for entry in &manifest.entries {
-        let target = entry.path.to_path(dest);
-        let meta = match fs::symlink_metadata(&target) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(io_err(&target)(e)),
-        };
-        if meta.file_type().is_symlink() {
-            return Err(SinkError::Symlink(entry.path.clone()));
-        }
-        match (&entry.kind, meta.is_dir()) {
-            (EntryKind::Dir, true) => {}
-            (EntryKind::File(_), false) => conflicts.push(entry.path.clone()),
-            _ => return Err(SinkError::TypeConflict(entry.path.clone())),
+        if check_target(dest, entry)? == Target::Different {
+            conflicts.push(entry.path.clone());
         }
     }
     Ok(conflicts)
+}
+
+/// What is at an entry's target path.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    /// Nothing, or the folder a folder entry wants.
+    Missing,
+    /// A file with exactly the expected content.
+    Identical,
+    /// A file with other content.
+    Different,
+}
+
+/// Looks at an entry's target path; errors for what overwriting cannot fix.
+fn check_target(dest: &Path, entry: &Entry) -> Result<Target, SinkError> {
+    let target = entry.path.to_path(dest);
+    let meta = match fs::symlink_metadata(&target) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Target::Missing),
+        Err(e) => return Err(io_err(&target)(e)),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(SinkError::Symlink(entry.path.clone()));
+    }
+    match (&entry.kind, meta.is_dir()) {
+        (EntryKind::Dir, true) => Ok(Target::Missing),
+        // Hash only when the size matches; that rules most files out cheaply.
+        (EntryKind::File(f), false) if meta.len() == f.size => {
+            let file = File::open(&target).map_err(io_err(&target))?;
+            if hash_file(&file).map_err(io_err(&target))? == f.hash {
+                Ok(Target::Identical)
+            } else {
+                Ok(Target::Different)
+            }
+        }
+        (EntryKind::File(_), false) => Ok(Target::Different),
+        _ => Err(SinkError::TypeConflict(entry.path.clone())),
+    }
+}
+
+fn hash_file(file: &File) -> io::Result<Hash> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(file)?;
+    Ok(hasher.finalize().into())
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> SinkError + '_ {

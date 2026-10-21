@@ -26,11 +26,13 @@ pub enum Event {
     },
     /// The receiver got the sender's offer (receiver side only).
     Offer(Offer),
-    /// Data is about to flow.
+    /// Data is about to flow (on the sender: once the receiver said what it
+    /// needs, which is when some chunks may already be on their way).
     Started {
         /// Bytes that will cross the network.
         total_bytes: u64,
-        /// Bytes that do not need sending (duplicate chunks; resumed data in M4).
+        /// Bytes that do not need sending: duplicate chunks, files already
+        /// at the destination and data kept from an interrupted attempt.
         skipped_bytes: u64,
     },
     /// More chunk data was sent or received.

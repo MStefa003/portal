@@ -15,8 +15,9 @@ Receiving "project" (1,284 files, 2.3 GB) from 192.168.1.20 [direct]
 [████████████░░░░░░░░] 61%  48 MB/s  ETA 0:19
 ```
 
-> **Status:** early development (milestone M3). Transfers work end to end
-> with short codes, with no server to set up.
+> **Status:** early development (milestone M4). Transfers work end to end
+> with short codes, with no server to set up, and pick up where they left
+> off when interrupted.
 
 ## Try it
 
@@ -33,8 +34,27 @@ On the other machine, run:
 # Machine B
 $ portal receive 4821937-baker-hazy
 Receiving "project" (2 files, 5.00 MB) from 192.168.1.20 [direct]
-✓ Received 2 files, 5.00 MB into C:\Users\you\Downloads
+Save it into C:\Users\you\Downloads? [Y/n]
+✓ Received 2 files, 5.00 MB into C:\Users\you\Downloads in 0.4s (12.50 MB/s)
 ```
+
+`portal receive` asks before saving anything; `--yes` skips the question
+(it is never asked when the input is not a terminal, e.g. in scripts).
+
+Received files go into the current folder. To always save them somewhere
+else, set a download folder once (`portal dir` shows it, `portal dir --reset`
+forgets it), or pick one for a single transfer with `--output`:
+
+```console
+$ portal dir ~/Downloads
+✓ Received files will be saved into /home/you/Downloads
+$ portal receive 4821937-baker-hazy --output ./elsewhere
+```
+
+If a transfer is interrupted, just run it again: the sender runs
+`portal send` with the same files, and only what is still missing crosses
+the network. Files the receiver already has with exactly the same content
+are skipped as well, so receiving a folder twice is not a conflict.
 
 The receiver finds the sender by the number at the start of the code: on
 the same network through mDNS (instant, works offline), anywhere else
@@ -54,6 +74,15 @@ yourself instead, with `--rendezvous wss://…/v1` or `PORTAL_RENDEZVOUS`.
 - Resumable and verified: every byte is BLAKE3-checked.
 - Content-defined chunking, so re-sending a changed folder only sends what changed.
 - Windows, macOS and Linux.
+
+## Shell completions
+
+```console
+portal completions powershell >> $PROFILE                                    # PowerShell
+portal completions bash > ~/.local/share/bash-completion/completions/portal  # Bash
+portal completions zsh > ~/.zfunc/_portal                                    # Zsh
+portal completions fish > ~/.config/fish/completions/portal.fish             # fish
+```
 
 ## Installing
 

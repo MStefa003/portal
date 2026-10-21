@@ -28,7 +28,7 @@ pub use endpoint::{NetMode, bind, local_addr, route};
 pub use error::NetError;
 pub use event::{Event, Reporter, Route};
 pub use iroh::{Endpoint, EndpointAddr, EndpointId};
-pub use receive::{ReceiveOptions, receive, receive_on};
+pub use receive::{Confirm, ReceiveOptions, receive, receive_on};
 pub use send::{send, send_on};
 
 use std::time::Duration;

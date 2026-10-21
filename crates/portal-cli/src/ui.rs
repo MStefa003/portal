@@ -1,6 +1,8 @@
 //! Terminal output: progress bar, sizes and messages.
 
+use std::io::IsTerminal;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use console::style;
 use indicatif::{
@@ -35,6 +37,46 @@ fn route_label(route: Route) -> String {
 /// A progress bar driven by [`Event`]s; hidden until data starts flowing.
 pub struct Progress {
     bar: ProgressBar,
+    /// When data started flowing.
+    started: Arc<Mutex<Option<Instant>>>,
+}
+
+/// How a finished transfer went.
+#[derive(Debug, Clone, Copy)]
+pub struct Stats {
+    elapsed: Duration,
+    bytes: u64,
+}
+
+impl Stats {
+    /// " in 3.2s (48.1 MB/s)", or " (already up to date)" if no data had to move.
+    pub fn suffix(stats: Option<Self>) -> String {
+        let Some(Self { elapsed, bytes }) = stats else {
+            return String::new();
+        };
+        if bytes == 0 {
+            return " (already up to date)".into();
+        }
+        let secs = elapsed.as_secs_f64();
+        let speed = if secs > 0.0 {
+            format!(" ({}/s)", DecimalBytes((bytes as f64 / secs) as u64))
+        } else {
+            String::new()
+        };
+        format!(" in {}{speed}", duration(elapsed))
+    }
+}
+
+/// "0.4s", "42.0s", "3m 07s", "1h 05m".
+fn duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{:.1}s", d.as_secs_f64())
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, secs % 3600 / 60)
+    }
 }
 
 impl Progress {
@@ -53,12 +95,16 @@ impl Progress {
         .progress_chars("█░");
         let bar = ProgressBar::hidden();
         bar.set_style(style);
-        Self { bar }
+        Self {
+            bar,
+            started: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// A [`Reporter`] that updates this bar and prints milestones for `role`.
     pub fn reporter(&self, role: Role) -> Reporter {
         let bar = self.bar.clone();
+        let started = self.started.clone();
         let route = Arc::new(Mutex::new(Route::Unknown));
         let say = move |bar: &ProgressBar, line: String| bar.suspend(|| println!("{line}"));
         Arc::new(move |event| match event {
@@ -90,11 +136,19 @@ impl Progress {
                 skipped_bytes,
             } => {
                 if skipped_bytes > 0 {
+                    let why = match role {
+                        Role::Send => "already on the receiver or repeated",
+                        Role::Receive => "already here or repeated",
+                    };
                     say(
                         &bar,
-                        format!("{} skipped (duplicate data)", DecimalBytes(skipped_bytes)),
+                        format!("{} {why}, not sent again", DecimalBytes(skipped_bytes)),
                     );
                 }
+                if let Ok(mut started) = started.lock() {
+                    *started = Some(Instant::now());
+                }
+                bar.reset_elapsed();
                 bar.set_length(total_bytes);
                 bar.set_draw_target(ProgressDrawTarget::stderr());
             }
@@ -102,8 +156,31 @@ impl Progress {
         })
     }
 
-    pub fn finish(&self) {
+    /// Hides the bar; returns how the transfer went if data started flowing.
+    pub fn finish(&self) -> Option<Stats> {
         self.bar.finish_and_clear();
+        let started = (*self.started.lock().ok()?)?;
+        Some(Stats {
+            elapsed: started.elapsed(),
+            bytes: self.bar.position(),
+        })
+    }
+}
+
+/// Whether there is a person at the terminal who can answer questions.
+pub fn can_ask() -> bool {
+    std::io::stdin().is_terminal() && console::Term::stderr().is_term()
+}
+
+/// Asks a yes/no question; Enter means yes. Anything unreadable means no.
+pub fn confirm(question: &str) -> bool {
+    let term = console::Term::stderr();
+    if term.write_str(&format!("{question} [Y/n] ")).is_err() {
+        return false;
+    }
+    match term.read_line() {
+        Ok(answer) => matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes"),
+        Err(_) => false,
     }
 }
 
@@ -124,5 +201,23 @@ mod tests {
         assert_eq!(describe(1284, 2_300_000_000, false), "1,284 files, 2.30 GB");
         assert_eq!(describe(1, 5, false), "1 file, 5 B");
         assert_eq!(describe(1, 5, true), "5 B");
+    }
+
+    #[test]
+    fn formats_durations_and_speed() {
+        assert_eq!(duration(Duration::from_millis(400)), "0.4s");
+        assert_eq!(duration(Duration::from_secs(187)), "3m 07s");
+        assert_eq!(duration(Duration::from_secs(3900)), "1h 05m");
+        let stats = Stats {
+            elapsed: Duration::from_secs(2),
+            bytes: 10_000_000,
+        };
+        assert_eq!(Stats::suffix(Some(stats)), " in 2.0s (5.00 MB/s)");
+        let nothing = Stats {
+            elapsed: Duration::from_secs(1),
+            bytes: 0,
+        };
+        assert_eq!(Stats::suffix(Some(nothing)), " (already up to date)");
+        assert_eq!(Stats::suffix(None), "");
     }
 }

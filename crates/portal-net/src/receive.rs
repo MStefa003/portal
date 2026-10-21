@@ -1,6 +1,8 @@
 //! Receiver side of a transfer. See `send.rs` for the message sequence.
 
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -23,13 +25,29 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Verified-but-unwritten chunks buffered between the network and the disk.
 const WRITE_QUEUE: usize = 64;
 
+/// Decides whether to accept the sender's offer. Runs on a blocking thread,
+/// so it may wait for the user to answer.
+pub type Confirm = Arc<dyn Fn(&Offer) -> bool + Send + Sync>;
+
 /// Where and how to write a received transfer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReceiveOptions {
     /// Folder to receive into.
     pub dest: PathBuf,
     /// What to do about existing files.
     pub overwrite: OverwritePolicy,
+    /// Asked before anything is written; `None` accepts every offer.
+    pub confirm: Option<Confirm>,
+}
+
+impl fmt::Debug for ReceiveOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiveOptions")
+            .field("dest", &self.dest)
+            .field("overwrite", &self.overwrite)
+            .field("confirm", &self.confirm.is_some())
+            .finish()
+    }
 }
 
 /// Connects to the sender at `sender` (paired through a rendezvous server)
@@ -86,9 +104,23 @@ async fn run(
     let (mut tx, mut rx) = conn.open_bi().await.map_err(NetError::connection)?;
     hello(&mut tx, &mut rx).await?;
     let (offer, manifest) = read_offer(&mut rx).await?;
-    reporter(Event::Offer(offer));
+    reporter(Event::Offer(offer.clone()));
 
-    let ReceiveOptions { dest, overwrite } = options;
+    let ReceiveOptions {
+        dest,
+        overwrite,
+        confirm,
+    } = options;
+    if let Some(confirm) = confirm {
+        let accepted = tokio::task::spawn_blocking(move || confirm(&offer))
+            .await
+            .map_err(NetError::join)?;
+        if !accepted {
+            let _ = write_msg(&mut tx, &Control::Decline(DeclineReason::Rejected)).await;
+            let _ = tx.finish();
+            return Err(NetError::Cancelled);
+        }
+    }
     let sink = tokio::task::spawn_blocking(move || Sink::new(&dest, manifest, overwrite))
         .await
         .map_err(NetError::join)?;

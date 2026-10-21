@@ -476,6 +476,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2661,10 +2670,11 @@ dependencies = [
 
 [[package]]
 name = "portal-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "console",
  "indicatif",
  "mainline",
@@ -2680,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "portal-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2695,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "portal-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "futures-util",
@@ -2716,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "portal-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2733,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "portal-rendezvous"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",

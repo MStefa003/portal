@@ -6,6 +6,23 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
+### Added
+- M4: resuming. An interrupted transfer keeps what arrived; when the same
+  files are sent again, the receiver re-checks the kept chunks and asks only
+  for what is missing. Files that already exist with identical content are
+  skipped instead of being reported as conflicts.
+- `portal receive` asks "Save it into …? [Y/n]" before writing anything when
+  run in a terminal; `--yes` / `-y` skips the question. The sender is told
+  when the receiver says no.
+- `portal dir <folder>` saves a download folder that `portal receive` uses
+  when `--output` is not given; `portal dir` shows it, `--reset` forgets it.
+- `portal completions <shell>` prints completions for bash, zsh, fish,
+  PowerShell and elvish.
+- The sender now shows a progress bar too, and both sides end with the time
+  taken and average speed.
+
 ## [0.1.0] - 2026-10-21
 
 First release.

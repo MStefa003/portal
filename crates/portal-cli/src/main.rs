@@ -1,21 +1,24 @@
 //! The `portal` command-line tool: a thin layer over the Portal libraries.
 #![forbid(unsafe_code)]
 
+mod config;
 mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
+use portal_core::path::PARTIAL_DIR_NAME;
 use portal_core::{OverwritePolicy, ScanOptions, SinkError};
-use portal_net::{DhtNetwork, Discovery, NetError, NetMode, ReceiveOptions};
-use portal_proto::{Code, DeclineReason, PakeError, RendezvousError};
+use portal_net::{Confirm, DhtNetwork, Discovery, NetError, NetMode, ReceiveOptions};
+use portal_proto::{Code, DeclineReason, Offer, PakeError, RendezvousError};
 use tracing_subscriber::EnvFilter;
 
-use crate::ui::{Progress, Role, describe};
+use crate::ui::{Progress, Role, Stats, describe};
 
 /// How long a sender waits for its receiver: as long as a rendezvous
 /// server keeps a nameplate.
@@ -74,13 +77,38 @@ enum Command {
         /// The code shown by the sender, e.g. 7-cedar-river. Asked for if omitted.
         code: Option<String>,
 
-        /// Folder to save into (defaults to the current directory).
+        /// Folder to save into (defaults to the one set with `portal dir`, or
+        /// the current directory).
         #[arg(short, long)]
         output: Option<PathBuf>,
 
         /// Overwrite existing files without asking.
         #[arg(long)]
         overwrite: bool,
+
+        /// Accept the transfer without asking first.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Show or set the folder received files are saved into.
+    Dir {
+        /// Folder to save received files into from now on. Shows the current
+        /// one if omitted.
+        path: Option<PathBuf>,
+
+        /// Go back to saving into the current directory.
+        #[arg(long, conflicts_with = "path")]
+        reset: bool,
+    },
+    /// Print a shell completion script.
+    ///
+    /// PowerShell: portal completions powershell >> $PROFILE
+    /// Bash:       portal completions bash > ~/.local/share/bash-completion/completions/portal
+    /// Zsh:        portal completions zsh > ~/.zfunc/_portal
+    #[command(verbatim_doc_comment)]
+    Completions {
+        /// The shell to write the script for.
+        shell: clap_complete::Shell,
     },
 }
 
@@ -120,7 +148,20 @@ async fn main() -> ExitCode {
             code,
             output,
             overwrite,
-        } => receive(code, output, overwrite, cli.rendezvous.as_deref(), &net).await,
+            yes,
+        } => {
+            let options = ReceiveFlags {
+                output,
+                overwrite,
+                yes,
+            };
+            receive(code, options, cli.rendezvous.as_deref(), &net).await
+        }
+        Command::Dir { path, reset } => dir(path.as_deref(), reset),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "portal", &mut std::io::stdout());
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -185,6 +226,7 @@ async fn send(
         flags.push_str(&format!(" --dht-bootstrap {node}"));
     }
 
+    let progress = Progress::new();
     let result = match rendezvous {
         Some(url) => {
             let waiting = portal_net::rendezvous::allocate(url)
@@ -194,17 +236,14 @@ async fn send(
             show_code(&waiting.code().to_string(), &flags);
             async {
                 let peer = waiting.pair(&endpoint, mode).await?;
-                let progress = Progress::new();
-                let result = portal_net::send(
+                portal_net::send(
                     &endpoint,
                     peer,
                     path,
                     manifest,
                     progress.reporter(Role::Send),
                 )
-                .await;
-                progress.finish();
-                result
+                .await
             }
             .await
         }
@@ -221,18 +260,15 @@ async fn send(
                 .await
                 .map_err(|_| NetError::Timeout("waiting for the receiver"))??;
                 drop(announcement);
-                let progress = Progress::new();
-                let result =
-                    portal_net::send_on(&conn, path, manifest, progress.reporter(Role::Send)).await;
-                progress.finish();
-                result
+                portal_net::send_on(&conn, path, manifest, progress.reporter(Role::Send)).await
             }
             .await
         }
     };
+    let stats = progress.finish();
     endpoint.close().await;
     result.map_err(|e| explain(e, rendezvous, Role::Send))?;
-    ui::success(format!("Sent {summary}"));
+    ui::success(format!("Sent {summary}{}", Stats::suffix(stats)));
     Ok(())
 }
 
@@ -242,13 +278,24 @@ fn show_code(code: &str, flags: &str) {
     println!("Waiting for receiver...");
 }
 
-async fn receive(
-    code: Option<String>,
+/// `portal receive` options besides the code and network settings.
+struct ReceiveFlags {
     output: Option<PathBuf>,
     overwrite: bool,
+    yes: bool,
+}
+
+async fn receive(
+    code: Option<String>,
+    flags: ReceiveFlags,
     rendezvous: Option<&str>,
     net: &Net,
 ) -> anyhow::Result<()> {
+    let ReceiveFlags {
+        output,
+        overwrite,
+        yes,
+    } = flags;
     let typed = match code {
         Some(code) => code,
         None => ask_for_code()?,
@@ -258,7 +305,18 @@ async fn receive(
     let code = Code::parse(&typed)?;
     let dest = match output {
         Some(dir) => dir,
-        None => std::env::current_dir().context("could not determine the current folder")?,
+        None => match config::download_dir()? {
+            Some(dir) => dir,
+            None => std::env::current_dir().context("could not determine the current folder")?,
+        },
+    };
+
+    // Ask only when someone can answer; scripts and pipes accept as before.
+    let confirm: Option<Confirm> = if yes || !ui::can_ask() {
+        None
+    } else {
+        let question = format!("Save it into {}?", dest.display());
+        Some(Arc::new(move |_: &Offer| ui::confirm(&question)))
     };
 
     let endpoint = portal_net::bind(net.mode, false).await?;
@@ -270,13 +328,13 @@ async fn receive(
         } else {
             OverwritePolicy::Never
         },
+        confirm,
     };
+    let progress = Progress::new();
     let result = async {
-        let progress;
-        let result = match rendezvous {
+        match rendezvous {
             Some(url) => {
                 let sender = portal_net::rendezvous::join(url, &code, &endpoint).await?;
-                progress = Progress::new();
                 portal_net::receive(&endpoint, sender, options, progress.reporter(Role::Receive))
                     .await
             }
@@ -284,21 +342,56 @@ async fn receive(
                 let sender =
                     portal_net::discovery::find(&code, &net.discovery, FIND_TIMEOUT).await?;
                 let conn = portal_net::direct::connect(&endpoint, sender, &code).await?;
-                progress = Progress::new();
                 portal_net::receive_on(&conn, options, progress.reporter(Role::Receive)).await
             }
-        };
-        progress.finish();
-        result
+        }
     }
     .await;
+    let stats = progress.finish();
     endpoint.close().await;
-    let summary = result.map_err(|e| explain(e, rendezvous, Role::Receive))?;
+    let summary = match result {
+        Ok(summary) => summary,
+        Err(NetError::Cancelled) => {
+            println!("Declined. Nothing was saved.");
+            return Ok(());
+        }
+        Err(e) => {
+            let e = explain(e, rendezvous, Role::Receive);
+            // Data arrived before the failure and was kept for a retry.
+            if stats.is_some() && dest.join(PARTIAL_DIR_NAME).exists() {
+                return Err(anyhow!(
+                    "{e:#}\n\nWhat arrived so far was kept. If the sender runs `portal send` again with the same files, only the rest is transferred."
+                ));
+            }
+            return Err(e);
+        }
+    };
     ui::success(format!(
-        "Received {} into {}",
+        "Received {} into {}{}",
         describe(summary.files, summary.bytes, false),
-        dest.display()
+        dest.display(),
+        Stats::suffix(stats),
     ));
+    Ok(())
+}
+
+/// `portal dir`: shows, sets or resets the saved download folder.
+fn dir(path: Option<&Path>, reset: bool) -> anyhow::Result<()> {
+    if reset {
+        config::reset_download_dir()?;
+        ui::success("Received files will be saved into the current directory");
+    } else if let Some(path) = path {
+        let saved = config::set_download_dir(path)?;
+        ui::success(format!(
+            "Received files will be saved into {}",
+            saved.display()
+        ));
+    } else {
+        match config::download_dir()? {
+            Some(dir) => println!("{}", dir.display()),
+            None => println!("Not set: received files are saved into the current directory."),
+        }
+    }
     Ok(())
 }
 
@@ -338,8 +431,11 @@ fn explain(e: NetError, rendezvous: Option<&str>, role: Role) -> anyhow::Error {
             "{e}. Use --overwrite to replace existing files, or --output to receive into another folder."
         ),
         NetError::Declined(DeclineReason::Conflicts) => anyhow!(
-            "the receiver already has files with these names. They can re-run with --overwrite or --output."
+            "the receiver already has different files with these names. They can re-run with --overwrite or --output."
         ),
+        NetError::Declined(DeclineReason::Rejected) => {
+            anyhow!("the receiver declined the transfer.")
+        }
         NetError::Connect(_) => anyhow::Error::new(e).context(
             "Could not reach the sender. Check that `portal send` is still running and that neither network blocks UDP",
         ),

@@ -66,6 +66,9 @@ pub enum NetError {
     /// The receiver declined the transfer.
     #[error("the transfer was declined: {0}")]
     Declined(DeclineReason),
+    /// We declined the transfer (the `confirm` callback said no).
+    #[error("the transfer was declined")]
+    Cancelled,
     /// The peer went away mid-transfer.
     #[error("the other side closed the connection before the transfer finished")]
     PeerClosed,

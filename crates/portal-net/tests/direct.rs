@@ -34,6 +34,7 @@ fn options(dest: &Path) -> ReceiveOptions {
     ReceiveOptions {
         dest: dest.to_path_buf(),
         overwrite: OverwritePolicy::Never,
+        confirm: None,
     }
 }
 

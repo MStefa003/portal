@@ -322,3 +322,74 @@ fn preserves_executable_bit() {
         .mode();
     assert_ne!(mode & 0o111, 0);
 }
+
+#[test]
+fn identical_files_are_not_conflicts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("proj");
+    make_project(&src);
+    let dest = tmp.path().join("out");
+    transfer(&src, &dest, OverwritePolicy::Never).unwrap();
+
+    // Receiving the same folder again needs no data and no --overwrite.
+    let scan = scan(&src, &ScanOptions::default()).unwrap();
+    let sink = Sink::new(&dest, scan.manifest, OverwritePolicy::Never).unwrap();
+    assert!(sink.is_complete());
+    sink.finish().unwrap();
+    assert_eq!(snapshot(&src), snapshot(&dest.join("proj")));
+}
+
+#[test]
+fn resumes_an_interrupted_transfer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("proj");
+    make_project(&src);
+    let dest = tmp.path().join("out");
+    let scan = scan(&src, &ScanOptions::default()).unwrap();
+    let source = Source::new(&src, &scan.manifest);
+
+    // First attempt: half the chunks arrive, then the connection drops.
+    let mut first = Sink::new(&dest, scan.manifest.clone(), OverwritePolicy::Never).unwrap();
+    let all = first.missing_chunks();
+    let half = all.len() / 2;
+    assert!(half > 1, "the test project needs several chunks");
+    for hash in &all[..half] {
+        first
+            .write_chunk(hash, &source.read_chunk(hash).unwrap())
+            .unwrap();
+    }
+    drop(first);
+
+    // Damage one byte of what was kept: that chunk must be fetched again.
+    let id = scan.manifest.transfer_id().unwrap();
+    let partial_dir = dest.join(PARTIAL_DIR_NAME).join(id.to_hex_prefix(16));
+    let (big, _, big_meta) = scan
+        .manifest
+        .files()
+        .find(|(_, e, _)| e.path.file_name() == "big.bin")
+        .unwrap();
+    assert!(all[..half].contains(&big_meta.chunks[0].hash));
+    let part = partial_dir.join(format!("{big}.part"));
+    let mut bytes = fs::read(&part).unwrap();
+    bytes[0] ^= 0x01;
+    fs::write(&part, bytes).unwrap();
+
+    let mut second = Sink::new(&dest, scan.manifest.clone(), OverwritePolicy::Never).unwrap();
+    let missing = second.missing_chunks();
+    assert!(
+        missing.len() < all.len(),
+        "kept chunks are not requested again"
+    );
+    assert!(
+        missing.len() > all.len() - half,
+        "the damaged chunk is requested again"
+    );
+    for hash in &missing {
+        second
+            .write_chunk(hash, &source.read_chunk(hash).unwrap())
+            .unwrap();
+    }
+    second.finish().unwrap();
+    assert_eq!(snapshot(&src), snapshot(&dest.join("proj")));
+    assert!(!dest.join(PARTIAL_DIR_NAME).exists());
+}

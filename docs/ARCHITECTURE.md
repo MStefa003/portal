@@ -112,7 +112,7 @@ Want hashes ─► queue ─► worker ×4 ─ data stream ─► reader task pe
 ```
 
 - **The receiver drives the transfer.** It decides what it needs (`Want`), so
-  dedup and resume (M4) need no changes on the sender side.
+  dedup and resume need no changes on the sender side.
 - **Frame reads are not cancel-safe.** Dropping a half-read frame would leave
   the stream mid-frame. So every stream is read by its own task, and `select!`
   only ever waits on channels and `JoinSet`s.

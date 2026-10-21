@@ -12,6 +12,7 @@
 //!    │◄──────── close ──────────────│
 //! ```
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,6 +167,13 @@ async fn stream_chunks(
         ));
     }
 
+    // Chunk sizes, to tell the progress display how much will be sent.
+    let sizes: HashMap<Hash, u32> = manifest
+        .files()
+        .flat_map(|(_, _, file)| file.chunks.iter().map(|c| (c.hash, c.len)))
+        .collect();
+    let mut wanted_bytes = 0u64;
+
     let mut want_tx = Some(want_tx);
     loop {
         tokio::select! {
@@ -175,12 +183,19 @@ async fn stream_chunks(
                         return Err(NetError::Protocol("Want after WantDone".into()));
                     };
                     for hash in hashes {
+                        wanted_bytes += sizes.get(&hash).copied().map_or(0, u64::from);
                         // Workers only stop early on error, which surfaces below.
                         let _ = tx.send(hash);
                     }
                 }
                 // Dropping the sender lets workers drain the queue and finish.
-                Some(Ok(Some(Control::WantDone))) => want_tx = None,
+                Some(Ok(Some(Control::WantDone))) => {
+                    want_tx = None;
+                    reporter(Event::Started {
+                        total_bytes: wanted_bytes,
+                        skipped_bytes: manifest.total_bytes().saturating_sub(wanted_bytes),
+                    });
+                }
                 Some(Ok(Some(Control::Done))) => return Ok(()),
                 Some(Ok(Some(Control::Error { message, .. }))) => {
                     return Err(NetError::Peer(sanitize(&message)));
