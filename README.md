@@ -72,6 +72,22 @@ curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/install.sh | 
 Or download an archive from the [Releases](https://github.com/MStefa003/portal/releases)
 page. Both scripts check the download's SHA-256 before installing.
 
+## Uninstalling
+
+Windows (PowerShell):
+
+```console
+irm https://raw.githubusercontent.com/MStefa003/portal/main/uninstall.ps1 | iex
+```
+
+macOS and Linux:
+
+```console
+curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/uninstall.sh | sh
+```
+
+This removes Portal only; files you sent or received stay where they are.
+
 ## Building
 
 ```console
