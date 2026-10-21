@@ -17,12 +17,15 @@ case "$(uname -s)" in
   *) echo "Unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 
-url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" \
-  | grep -o "https://[^\"]*-$target\.tar\.gz" | head -n 1) || true
-if [ -z "$url" ]; then
-  echo "Could not find a Portal download for $target. See https://github.com/$repo/releases" >&2
+# The newest version, from where github.com/<repo>/releases/latest redirects.
+# Unlike the GitHub API, this has no hourly limit per IP address.
+latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest" || true)
+tag=${latest##*/releases/tag/}
+if [ -z "$latest" ] || [ "$tag" = "$latest" ]; then
+  echo "Could not find a Portal release to install. See https://github.com/$repo/releases" >&2
   exit 1
 fi
+url="https://github.com/$repo/releases/download/$tag/portal-$tag-$target.tar.gz"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
