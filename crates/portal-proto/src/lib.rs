@@ -9,9 +9,15 @@
 //! Every message is a length-prefixed frame (see [`frame`]), and every length
 //! read from the network is checked against a hard cap before allocating.
 //!
-//! Before that, the peers find each other with a short [`Code`]: the
-//! [`rendezvous`] server pairs them by the code's number, and the [`pake`]
-//! handshake proves both know the code's words and exchanges their addresses.
+//! Before that, the peers find each other with a short [`Code`], in one of
+//! two ways:
+//! - **direct** (the default): the receiver finds the sender by the code's
+//!   number on the local network or the DHT, connects with [`PAIR_ALPN`], and
+//!   the [`pake`] handshake runs on the connection's first stream;
+//! - **rendezvous**: a [`rendezvous`] server pairs them by the code's number
+//!   and relays the [`pake`] handshake, which exchanges their addresses; the
+//!   receiver then connects with [`ALPN`].
+//!
 //! See `docs/PROTOCOL.md` for the full description.
 #![forbid(unsafe_code)]
 
@@ -37,8 +43,13 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Oldest protocol version this build can still talk to.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
 
-/// QUIC application protocol identifier (ALPN) for Portal transfers.
+/// QUIC application protocol identifier (ALPN) for Portal transfers whose
+/// peers were already paired by a rendezvous server.
 pub const ALPN: &[u8] = b"portal/1";
+
+/// ALPN for direct connections: the first bidirectional stream carries the
+/// [`pake`] handshake, then the transfer proceeds as with [`ALPN`].
+pub const PAIR_ALPN: &[u8] = b"portal-pair/1";
 
 /// Maximum size of one control-stream frame.
 pub const MAX_CONTROL_FRAME: usize = 1024 * 1024;

@@ -32,7 +32,8 @@ pub struct ReceiveOptions {
     pub overwrite: OverwritePolicy,
 }
 
-/// Connects to the sender at `sender` and receives its transfer.
+/// Connects to the sender at `sender` (paired through a rendezvous server)
+/// and [`receive_on`] that connection.
 pub async fn receive(
     endpoint: &Endpoint,
     sender: EndpointAddr,
@@ -50,19 +51,29 @@ pub async fn receive(
         conn.close(2u32.into(), b"unexpected peer");
         return Err(NetError::WrongPeer);
     }
+    receive_on(&conn, options, reporter).await
+}
+
+/// Receives the transfer offered by the already-authenticated sender on
+/// `conn`, then hangs up.
+pub async fn receive_on(
+    conn: &Connection,
+    options: ReceiveOptions,
+    reporter: Reporter,
+) -> Result<Summary, NetError> {
     reporter(Event::Connected {
         peer: conn.remote_id().fmt_short().to_string(),
-        route: endpoint::route(&conn),
+        route: endpoint::route(conn),
     });
 
-    let result = run(&conn, options, &reporter).await;
+    let result = run(conn, options, &reporter).await;
     match &result {
         // The sender closes once it has read our `Done`; waiting for that
         // makes sure `Done` was delivered before we exit.
         Ok(_) => {
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, conn.closed()).await;
         }
-        Err(_) => hang_up(&conn, &result).await,
+        Err(_) => hang_up(conn, &result).await,
     }
     result
 }

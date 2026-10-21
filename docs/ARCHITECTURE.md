@@ -19,14 +19,36 @@ portal-rendezvous ──► portal-proto
 - **portal-proto** defines every byte on the wire, the protocol version and
   hard size caps for anything read from the network. It also holds the
   sans-IO parts of the code handshake: code parsing, SPAKE2 and sealing.
-- **portal-net** moves bytes: iroh endpoints, the rendezvous client, and
-  sending and receiving transfers.
+- **portal-net** moves bytes: iroh endpoints, peer discovery (mDNS and the
+  Mainline DHT), direct pairing, the rendezvous client, and sending and
+  receiving transfers.
 - **portal-cli** is a thin layer: arguments, prompts, progress bars.
-- **portal-rendezvous** is a dumb mailbox (axum, WebSockets). It never sees
-  code words, keys or file contents. It is a library plus a binary, so tests
-  can run it in-process.
+- **portal-rendezvous** is an optional dumb mailbox (axum, WebSockets), for
+  networks where discovery does not work. It never sees code words, keys or
+  file contents. It is a library plus a binary, so tests can run it
+  in-process.
 
-## Connection flow (M3)
+## Connection flow without a server (default)
+
+1. The sender picks a random nameplate and two random words locally:
+   `4821937-cedar-river`. It announces "the sender for 4821937 is node X"
+   with mDNS on the local network and, once it has reached a relay, in the
+   BitTorrent Mainline DHT under a key derived from the number.
+2. The receiver types the code. It is checked against the wordlist offline
+   first, then the receiver searches mDNS and the DHT at once and dials the
+   first address found, with ALPN `portal-pair/1`.
+3. On that connection both run SPAKE2 with the full code as password, then
+   each seals its own node ID. Each checks the opened node ID against the one
+   the connection's TLS authenticated. A wrong code or a relaying
+   man-in-the-middle makes both abort, and the code is gone.
+4. The transfer runs on the same connection.
+
+Discovery results are untrusted hints. The DHT key is derivable from the
+number alone, so anyone who knows (or brute-forces) a number can read or
+overwrite its record. That is harmless to confidentiality: whoever answers
+still has to pass the handshake, and gets one guess.
+
+## Connection flow with a rendezvous server (opt-in)
 
 1. The sender connects to the rendezvous server, gets a nameplate (`7`) and
    picks two random words locally: `7-cedar-river`.
@@ -49,7 +71,9 @@ portal-rendezvous ──► portal-proto
 
 | Attacker | Can | Cannot |
 |---|---|---|
-| Rendezvous server operator | see nameplates, timing and IP addresses; refuse service | learn the words, swap identities, read files |
+| Rendezvous server operator (opt-in) | see nameplates, timing and IP addresses; refuse service | learn the words, swap identities, read files |
+| Anyone watching the DHT | find active numbers by brute force (10 M keys) and see the sender's node ID and relay; overwrite the record so the receiver dials them instead | learn the words, see the sender's IP address while it has a relay, get past the handshake |
+| Someone on the same LAN | see mDNS announcements: number, node ID, local addresses | learn the words or get past the handshake |
 | Network observer | see that two hosts talk QUIC (and to which relay) | read anything: TLS 1.3 inside QUIC |
 | iroh relay operator | see node IDs and encrypted traffic volume | read or alter traffic |
 | Someone guessing codes | take one guess per code (1 in 1.68 M) and make that transfer fail | try again on the same code |

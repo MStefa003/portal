@@ -2,16 +2,20 @@
 //! that moves a [`portal_core::Manifest`] and its chunks between two peers.
 //!
 //! - [`bind`] creates an iroh endpoint.
-//! - [`rendezvous`] turns a short code into the other peer's authenticated
-//!   identity: [`rendezvous::allocate`] + [`rendezvous::Waiting::pair`] on the
-//!   sender, [`rendezvous::join`] on the receiver.
-//! - [`send`] waits for that receiver and serves it.
-//! - [`receive`] connects to the sender and writes into a destination folder.
+//! - Pairing by short code, without a server (the default):
+//!   [`discovery::announce`] + [`direct::accept`] on the sender,
+//!   [`discovery::find`] + [`direct::connect`] on the receiver. Both end with
+//!   a connection to the authenticated peer, for [`send_on`] / [`receive_on`].
+//! - Pairing through a rendezvous server: [`rendezvous`] turns the code into
+//!   the other peer's identity; [`send`] waits for that receiver and serves
+//!   it, [`receive`] connects to the sender.
 //!
 //! Progress is reported through a [`Reporter`] callback so the CLI (and later
 //! the GUI) can render it however it likes.
 #![forbid(unsafe_code)]
 
+pub mod direct;
+pub mod discovery;
 mod endpoint;
 mod error;
 mod event;
@@ -19,12 +23,13 @@ mod receive;
 pub mod rendezvous;
 mod send;
 
+pub use discovery::{DhtNetwork, Discovery};
 pub use endpoint::{NetMode, bind, local_addr, route};
 pub use error::NetError;
 pub use event::{Event, Reporter, Route};
 pub use iroh::{Endpoint, EndpointAddr, EndpointId};
-pub use receive::{ReceiveOptions, receive};
-pub use send::send;
+pub use receive::{ReceiveOptions, receive, receive_on};
+pub use send::{send, send_on};
 
 use std::time::Duration;
 

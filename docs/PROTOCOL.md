@@ -15,20 +15,28 @@ Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
 
 ## Layers
 
-1. **Rendezvous** (WebSocket to `portal-rendezvous`): nameplate allocation and
-   an opaque relay between two clients.
-2. **Handshake** (relayed): SPAKE2, then one sealed message each way carrying
-   the peers' iroh identities.
-3. **Peer** (iroh QUIC, ALPN `portal/1`): a control stream plus parallel data
-   streams carrying chunks.
+1. **Finding the peer**, one of:
+   - **Discovery** (the default, no server): the sender announces its
+     nameplate on the local network (mDNS) and in the BitTorrent Mainline
+     DHT; the receiver looks it up and dials the sender directly.
+   - **Rendezvous** (WebSocket to `portal-rendezvous`, opt-in): nameplate
+     allocation and an opaque relay between two clients.
+2. **Handshake**: SPAKE2, then one sealed message each way carrying the
+   peers' iroh identities. Runs on the direct connection (ALPN
+   `portal-pair/1`) or through the rendezvous relay.
+3. **Peer** (iroh QUIC): a control stream plus parallel data streams carrying
+   chunks. With discovery it follows the handshake on the same connection;
+   with rendezvous it is a new connection with ALPN `portal/1`.
 
 ## Codes
 
 A code is `<nameplate>-<word>-<word>`, for example `7-cedar-river`.
 
-- **Nameplate**: a decimal number from 1 to 9,999,999, handed out by the
-  rendezvous server. It is not secret. The server draws it at random from
-  `1..=max(99, 4 × waiting senders)`, so codes stay short.
+- **Nameplate**: a decimal number from 1 to 9,999,999. It is not secret.
+  With discovery the sender draws it uniformly from the whole range, so
+  unrelated senders around the world rarely pick the same one. A rendezvous
+  server instead draws it from `1..=max(99, 4 × waiting senders)`, so codes
+  stay short.
 - **Words**: 2 words chosen uniformly by the sender from a 1,295-word list
   (the EFF Short Wordlist #1 without "yo-yo"; see `NOTICE`), using the OS
   random number generator. That gives about 20.7 bits.
@@ -38,10 +46,61 @@ A code is `<nameplate>-<word>-<word>`, for example `7-cedar-river`.
 - The canonical form (lowercase, single hyphens) is the SPAKE2 password.
 
 20.7 bits is fine because an attacker gets **one online guess per code**:
-the first claim of a nameplate consumes it, and a wrong guess makes the
-sender abort. The chance of a successful guess is 1 in 1,677,025.
+a wrong guess makes the sender abort, and (with a rendezvous server) the
+first claim of a nameplate consumes it. The chance of a successful guess is
+1 in 1,677,025.
 
-## Rendezvous protocol (version 1)
+## Discovery (default)
+
+The sender announces its nameplate `N` in two places and the receiver
+searches both at once, using whichever answers first. Neither is trusted:
+the result is only an address to dial, and the handshake decides.
+
+**Mainline DHT** (BEP 44 mutable item, no salt):
+- Signing key: Ed25519 with seed
+  `blake3::derive_key("portal 2026-10-21 dht key for nameplate", N as u32 big-endian)`.
+  Anyone who knows `N` can derive it, which is what lets the receiver find
+  the item (and what lets others overwrite it; see the threat model).
+- Value: postcard `DhtRecord { version: 1, addr: EndpointAddr }`, at most
+  1000 bytes. When the sender has a home relay, `addr` holds only its node
+  ID and relay URL, so IP addresses stay out of the public DHT; the direct
+  path is found by hole punching. Without a relay it holds the direct
+  addresses instead.
+- `seq` is the Unix time in seconds. The receiver takes the most recent item
+  and ignores it if it is older than 2 hours (a leftover from an earlier
+  transfer with the same number). The sender republishes every 30 minutes.
+- The receiver retries the lookup every 2 s until its timeout (60 s in the
+  CLI), since the sender may still be publishing.
+
+**mDNS** on the local network:
+- Service `_portal._udp.local.`, instance `portal-<N>`, port = the sender's
+  IPv4 iroh port, A/AAAA records for its interface addresses.
+- TXT `id` = the sender's node ID (hex), `port6` = its IPv6 port, if any.
+- IPv6 link-local addresses are skipped (they need a scope ID).
+
+## Direct pairing (default)
+
+The receiver dials the discovered address with ALPN `portal-pair/1` and
+opens a bidirectional stream. On it, both sides run the handshake below
+with length-prefixed `PeerMsg` frames (at most 4 KiB), and each side seals
+**its own** node ID. Each side then checks that the node ID it opened equals
+the node ID that the QUIC connection's TLS authenticated. A machine that
+relays the handshake between the real peers knows neither key nor code: the
+peers derive the same key, but each finds the other's sealed node ID differs
+from the node it is connected to, and aborts.
+
+The sender handles one pairing connection at a time:
+- a connection that fails before its first `Pake` message arrives (within
+  15 s) did not try the code; the sender drops it and keeps waiting;
+- any failure after that counts as a guess: the sender aborts for good;
+- connections with ALPN `portal/1` are refused.
+
+After the handshake, both finish the pairing stream, and the receiver opens
+the control stream of the peer protocol on the same connection.
+
+## Rendezvous protocol (version 1, opt-in)
+
+Used when `--rendezvous <url>` or `PORTAL_RENDEZVOUS` is set.
 
 WebSocket at `<server>/v1` (`ws://` or `wss://`). Each binary WebSocket
 message is one postcard `ClientMsg` or `ServerMsg`; text messages are a
@@ -87,8 +146,9 @@ Server rules:
 
 ## Handshake (protocol version 1)
 
-Runs over `Relay` messages once both peers are `Paired`. Each relayed payload
-is one postcard `PeerMsg`:
+Runs on the pairing stream of a direct connection (see above), or over
+`Relay` messages once both peers are `Paired` at a rendezvous server. Each
+message is one postcard `PeerMsg`:
 
 | # | `PeerMsg` | Meaning |
 |---|---|---|
@@ -104,11 +164,15 @@ is one postcard `PeerMsg`:
    and `... from receiver`. Because each key seals exactly one message, the
    nonce is fixed at zero. Separate keys also mean a reflected message never
    opens.
-3. The sender sends `Sealed(postcard(EndpointAddr))`: its node ID plus relay
-   URL and IP addresses. The receiver sends `Sealed(postcard(EndpointId))`.
+3. Direct: each side sends `Sealed(postcard(EndpointId))` with its own node
+   ID. Rendezvous: the sender sends `Sealed(postcard(EndpointAddr))`, its
+   node ID plus relay URL and IP addresses, and the receiver sends
+   `Sealed(postcard(EndpointId))`.
 4. Failure to open a `Sealed` message means the codes differed: the side
-   that notices aborts, and the code is gone.
-5. Both close the WebSocket. The receiver dials the sender's `EndpointAddr`
+   that notices aborts, and the code is gone. Before hanging up it waits
+   (up to 3 s) until its own `Sealed` message has been delivered, so the
+   other side sees a wrong code rather than a dropped connection.
+5. Rendezvous only: both close the WebSocket. The receiver dials the sender's `EndpointAddr`
    over iroh. iroh's TLS authenticates the node ID, and the receiver checks it
    again. The sender accepts **only** the node ID from step 3 and closes any
    other connection.

@@ -28,6 +28,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+mainline.workspace = true
 portal-rendezvous.workspace = true
 tempfile.workspace = true
 

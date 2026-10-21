@@ -1,6 +1,6 @@
 [package]
 name = "portal-net"
-description = "Portal networking: iroh connections, PAKE handshake, rendezvous client"
+description = "Portal networking: iroh connections, PAKE handshake, peer discovery, rendezvous client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,15 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+blake3.workspace = true
 futures-util.workspace = true
 iroh.workspace = true
+mainline.workspace = true
+mdns-sd.workspace = true
 portal-core.workspace = true
 portal-proto.workspace = true
 postcard.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true

@@ -1,12 +1,17 @@
 # Running a rendezvous server
 
-Two Portal peers need a rendezvous server to find each other. It only pairs
-them and relays a few hundred bytes of handshake. File data never goes
+**You do not need one.** By default Portal finds the other side without any
+server: on the local network with mDNS, and across the internet through the
+BitTorrent Mainline DHT.
+
+A rendezvous server is an optional alternative for networks where that does
+not work, for example when outgoing UDP is blocked so the DHT is unreachable
+(a WebSocket over `wss://` gets through almost anything). It only pairs the
+peers and relays a few hundred bytes of handshake. File data never goes
 through it, and it never learns the code words. A small VPS or a Raspberry Pi
 is plenty.
 
-There is no public instance yet. Until there is, you run one yourself and
-point `portal` at it:
+Point both sides at it:
 
 ```console
 $ portal send --rendezvous wss://portal.example.com/v1 ./project

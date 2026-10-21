@@ -1,8 +1,10 @@
 //! Short transfer codes like `7-cedar-river`.
 //!
 //! A code has two parts:
-//! - the **nameplate** (`7`): a number the rendezvous server hands out so the
-//!   two peers find each other. The server sees it; it is not secret.
+//! - the **nameplate** (`7`): a number the two peers find each other by.
+//!   Either the sender picks it at random and announces it on the local
+//!   network and the DHT, or a rendezvous server hands it out. It is not
+//!   secret.
 //! - the **words** (`cedar-river`): random words from the EFF short wordlist.
 //!   They never leave the machines; the whole code is the SPAKE2 password.
 //!
@@ -74,6 +76,13 @@ impl Code {
         Ok(Self { nameplate, words })
     }
 
+    /// A fresh code with a random nameplate, for finding peers without a
+    /// server. The range is wide so unrelated senders rarely collide.
+    pub fn random() -> Result<Self, CodeError> {
+        let nameplate = random_below(MAX_NAMEPLATE as usize)? as u32 + 1;
+        Self::generate(nameplate)
+    }
+
     /// Reads a code typed by a person: case-insensitive, surrounding spaces
     /// ignored, and spaces accepted in place of hyphens.
     pub fn parse(input: &str) -> Result<Self, CodeError> {
@@ -114,7 +123,7 @@ impl Code {
         Ok(Self { nameplate, words })
     }
 
-    /// The nameplate (the number shared with the rendezvous server).
+    /// The nameplate: the public number peers find each other by.
     pub fn nameplate(&self) -> u32 {
         self.nameplate
     }
@@ -203,6 +212,15 @@ mod tests {
         for n in [1, 7, 42, MAX_NAMEPLATE] {
             let code = Code::generate(n).unwrap();
             assert_eq!(code.nameplate(), n);
+            assert_eq!(Code::parse(&code.to_string()).unwrap(), code);
+        }
+    }
+
+    #[test]
+    fn random_codes_roundtrip() {
+        for _ in 0..50 {
+            let code = Code::random().unwrap();
+            assert!((1..=MAX_NAMEPLATE).contains(&code.nameplate()));
             assert_eq!(Code::parse(&code.to_string()).unwrap(), code);
         }
     }

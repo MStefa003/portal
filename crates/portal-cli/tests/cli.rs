@@ -49,14 +49,12 @@ fn rendezvous() -> String {
     rx.recv().unwrap()
 }
 
-/// Two real `portal` processes transferring a folder over 127.0.0.1, paired
-/// by code through a real rendezvous server.
-#[test]
-fn send_and_receive_between_two_processes() {
+/// Runs `portal send` and `portal receive` with `flags` on both sides and
+/// checks that the folder arrived.
+fn transfer_between_two_processes(flags: &[&str]) {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let url = rendezvous();
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("project");
     std::fs::create_dir_all(src.join("sub")).unwrap();
@@ -65,8 +63,10 @@ fn send_and_receive_between_two_processes() {
     let dest = tmp.path().join("received");
 
     let mut sender = portal()
-        .args(["--loopback", "send", "--rendezvous", &url])
+        .args(flags)
+        .arg("send")
         .arg(&src)
+        .env_remove("PORTAL_RENDEZVOUS")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -88,15 +88,10 @@ fn send_and_receive_between_two_processes() {
         .expect("sender printed a code");
 
     let out = portal()
-        .args([
-            "--loopback",
-            "receive",
-            "--rendezvous",
-            &url,
-            &code,
-            "--output",
-        ])
+        .args(flags)
+        .args(["receive", &code, "--output"])
         .arg(&dest)
+        .env_remove("PORTAL_RENDEZVOUS")
         .output()
         .unwrap();
     assert!(
@@ -116,32 +111,34 @@ fn send_and_receive_between_two_processes() {
     );
 }
 
+/// Paired through a real rendezvous server.
+#[test]
+fn send_and_receive_through_a_rendezvous_server() {
+    let url = rendezvous();
+    transfer_between_two_processes(&["--loopback", "--rendezvous", &url]);
+}
+
+/// No server: the receiver finds the sender in a (private) DHT.
+#[test]
+fn send_and_receive_through_the_dht() {
+    let net = mainline::Testnet::builder(10).build().unwrap();
+    let mut flags = vec!["--loopback".to_owned()];
+    for node in &net.bootstrap {
+        flags.push("--dht-bootstrap".to_owned());
+        flags.push(node.clone());
+    }
+    let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+    transfer_between_two_processes(&flags);
+}
+
 /// Typos are caught before contacting anyone, so they do not use up the code.
 #[test]
 fn receive_catches_typos_offline() {
     let out = portal()
-        .args([
-            "--loopback",
-            "receive",
-            "--rendezvous",
-            "ws://127.0.0.1:1/v1",
-            "7-cedar-rivr",
-        ])
+        .args(["--loopback", "receive", "7-cedar-rivr"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("did you mean \"river\""), "{stderr}");
-}
-
-#[test]
-fn default_rendezvous_explains_self_hosting() {
-    let out = portal()
-        .args(["receive", "7-cedar-river"])
-        .env_remove("PORTAL_RENDEZVOUS")
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("SELF_HOSTING"), "{stderr}");
 }

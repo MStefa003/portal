@@ -30,6 +30,12 @@ pub enum NetError {
     /// The connection to the rendezvous server dropped.
     #[error("lost the connection to the rendezvous server")]
     RendezvousLost,
+    /// Announcing or searching on the local network or the DHT failed.
+    #[error("peer discovery failed")]
+    Discovery(#[source] BoxError),
+    /// Nobody announced the code's number on the local network or the DHT.
+    #[error("no sender found for this code")]
+    SenderNotFound,
     /// The other peer left the rendezvous before the handshake finished.
     #[error("the other side disconnected before the handshake finished")]
     PeerLeft,

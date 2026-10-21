@@ -7,6 +7,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- Serverless pairing, now the default: `portal send` picks a random code
+  number and announces it with mDNS on the local network and in the
+  BitTorrent Mainline DHT; `portal receive` finds it there and runs the code
+  handshake directly on the QUIC connection (ALPN `portal-pair/1`), with each
+  side checking the other's sealed node ID against the TLS-authenticated one.
+  The DHT record holds only the node ID and relay when a relay is known.
+- `--rendezvous` / `PORTAL_RENDEZVOUS` is now an opt-in alternative, and a
+  global flag.
+- Release workflow building Windows, macOS and Linux (x86_64 and ARM64)
+  archives on `v*` tags, plus `install.ps1` / `install.sh`.
 - M3: short codes and authenticated pairing:
   - `portal send` shows a code like `7-cedar-river`; `portal receive <code>`
     (or prompts for it). Typos are caught locally with a suggestion.
@@ -45,5 +55,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - CI on Windows, macOS and Linux: fmt, clippy (`-D warnings`) and tests.
 - Dual MIT / Apache-2.0 license.
 
+### Changed
+- Dev builds no longer use incremental compilation, which kept growing
+  `target/` past 4 GB.
+
 ### Removed
+- The placeholder default rendezvous URL.
 - `portal receive --addr`: unauthenticated addresses are replaced by codes.

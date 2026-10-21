@@ -1,14 +1,19 @@
-//! The code handshake: SPAKE2 over the rendezvous relay, then one sealed
-//! message in each direction.
+//! The code handshake: SPAKE2, then one sealed message in each direction.
 //!
 //! ```text
 //! sender                                   receiver
 //!   │── Pake { version, spake2 msg } ──────►│  (both at once)
 //!   │◄────── Pake { version, spake2 msg } ──│
 //!   │  K = SPAKE2 key; one subkey per direction
-//!   │── Sealed(sender's endpoint address) ─►│
-//!   │◄───────── Sealed(receiver's node ID) ─│
+//!   │── Sealed(sender's identity) ─────────►│
+//!   │◄─────── Sealed(receiver's identity) ──│
 //! ```
+//!
+//! It runs either through a rendezvous server (the sealed messages carry the
+//! sender's address and the receiver's node ID) or directly on a QUIC
+//! connection (each side seals its own node ID, and checks the other's
+//! against the node ID the connection's TLS authenticated, so a man in the
+//! middle relaying the handshake is caught).
 //!
 //! Both sides use the whole code as the SPAKE2 password. Someone without the
 //! code words (including the rendezvous server) gets one guess: a wrong guess
@@ -32,7 +37,7 @@ const PAKE_IDENTITY: &[u8] = b"portal/1 code handshake";
 const SENDER_CONTEXT: &str = "portal 2026-10-21 sealed message from sender";
 const RECEIVER_CONTEXT: &str = "portal 2026-10-21 sealed message from receiver";
 
-/// A message relayed between the two peers through the rendezvous server.
+/// A handshake message between the two peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerMsg {
     /// First message: protocol versions and the SPAKE2 message.

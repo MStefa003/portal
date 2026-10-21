@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use iroh::endpoint::{Connection, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
-use portal_proto::ALPN;
+use portal_proto::{ALPN, PAIR_ALPN};
 
 use crate::error::NetError;
 use crate::event::Route;
@@ -23,7 +23,8 @@ pub enum NetMode {
     Loopback,
 }
 
-/// Creates an endpoint. A sender (`listen = true`) accepts Portal connections.
+/// Creates an endpoint. A sender (`listen = true`) accepts Portal connections,
+/// both direct ([`PAIR_ALPN`]) and paired by a rendezvous server ([`ALPN`]).
 pub async fn bind(mode: NetMode, listen: bool) -> Result<Endpoint, NetError> {
     let builder = match mode {
         NetMode::Internet => Endpoint::builder(presets::N0),
@@ -34,7 +35,11 @@ pub async fn bind(mode: NetMode, listen: bool) -> Result<Endpoint, NetError> {
             .bind_addr("127.0.0.1:0")
             .map_err(NetError::bind)?,
     };
-    let alpns = if listen { vec![ALPN.to_vec()] } else { vec![] };
+    let alpns = if listen {
+        vec![PAIR_ALPN.to_vec(), ALPN.to_vec()]
+    } else {
+        vec![]
+    };
     builder.alpns(alpns).bind().await.map_err(NetError::bind)
 }
 
