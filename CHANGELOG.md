@@ -6,6 +6,10 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-21
+
+First release.
+
 ### Added
 - Serverless pairing, now the default: `portal send` picks a random code
   number and announces it with mDNS on the local network and in the

@@ -6,9 +6,18 @@ $repo = 'MStefa003/portal'
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
 $target = "$arch-pc-windows-msvc"
 
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+# `return`, not `exit`: under `irm | iex`, exit would close the user's window.
+try {
+    $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+} catch {
+    Write-Host "Could not find a Portal release to install. Check your internet connection, or see https://github.com/$repo/releases" -ForegroundColor Yellow
+    return
+}
 $asset = $release.assets | Where-Object { $_.name -like "*-$target.zip" } | Select-Object -First 1
-if (-not $asset) { throw "No Portal download for $target in $($release.tag_name)." }
+if (-not $asset) {
+    Write-Host "Portal $($release.tag_name) has no download for $target yet. See https://github.com/$repo/releases" -ForegroundColor Yellow
+    return
+}
 $sum = $release.assets | Where-Object { $_.name -eq "$($asset.name).sha256" } | Select-Object -First 1
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid())

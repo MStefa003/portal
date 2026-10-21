@@ -18,9 +18,9 @@ case "$(uname -s)" in
 esac
 
 url=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" \
-  | grep -o "https://[^\"]*-$target\.tar\.gz" | head -n 1)
+  | grep -o "https://[^\"]*-$target\.tar\.gz" | head -n 1) || true
 if [ -z "$url" ]; then
-  echo "No Portal download for $target." >&2
+  echo "Could not find a Portal download for $target. See https://github.com/$repo/releases" >&2
   exit 1
 fi
 
