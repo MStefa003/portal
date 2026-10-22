@@ -1,18 +1,18 @@
 {
-    "version": "0.3.0",
+    "version": "0.3.1",
     "description": "Send files and folders directly between two machines: peer-to-peer, end-to-end encrypted and resumable.",
     "homepage": "https://github.com/MStefa003/portal",
     "license": "MIT|Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/MStefa003/portal/releases/download/v0.3.0/portal-v0.3.0-x86_64-pc-windows-msvc.zip",
-            "hash": "bb8af3c1f8b3b174aba004ff00e8721ea912da940492d935ab9ee5f4292d87cd",
-            "extract_dir": "portal-v0.3.0-x86_64-pc-windows-msvc"
+            "url": "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-x86_64-pc-windows-msvc.zip",
+            "hash": "97f8f190c74c4e6eea1d36fc68095518726bc77e3cea83b12ec44868a5f48e85",
+            "extract_dir": "portal-v0.3.1-x86_64-pc-windows-msvc"
         },
         "arm64": {
-            "url": "https://github.com/MStefa003/portal/releases/download/v0.3.0/portal-v0.3.0-aarch64-pc-windows-msvc.zip",
-            "hash": "a563fddd9613a78bd53afbd1adbb1b494980752527e5e25d90802b04ab5715a2",
-            "extract_dir": "portal-v0.3.0-aarch64-pc-windows-msvc"
+            "url": "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-aarch64-pc-windows-msvc.zip",
+            "hash": "94ecefaea9c2e4ce5d18b4e81d7e09bbe958014a93423b124f3b55e3a3ea4e37",
+            "extract_dir": "portal-v0.3.1-aarch64-pc-windows-msvc"
         }
     },
     "bin": [

@@ -1,5 +1,5 @@
 PackageIdentifier: MStefa003.Portal
-PackageVersion: 0.3.0
+PackageVersion: 0.3.1
 PackageLocale: en-US
 Publisher: Marios Stefanidis
 PublisherUrl: https://github.com/MStefa003
@@ -13,6 +13,6 @@ Tags:
 - p2p
 - encryption
 - cli
-ReleaseNotesUrl: https://github.com/MStefa003/portal/releases/tag/v0.3.0
+ReleaseNotesUrl: https://github.com/MStefa003/portal/releases/tag/v0.3.1
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0
