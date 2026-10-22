@@ -1,12 +1,23 @@
 name: Release
 
 # Push a tag like v0.2.0 to build every platform and publish a GitHub Release.
+#
+# Optional, each enabled by adding its secrets (see docs/RELEASING.md):
+# - Windows code signing through SignPath: SIGNPATH_API_TOKEN secret and
+#   SIGNPATH_ORGANIZATION_ID variable.
+# - macOS signing and notarization: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+#   APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD secrets.
+# - winget: WINGET_TOKEN secret.
+# Without them the release is built and published unsigned, as before.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+  # Build provenance attestations (`gh attestation verify`).
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,35 +37,98 @@ jobs:
           # The oldest supported Ubuntu runner, so the binaries need only an old glibc.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+    env:
+      NAME: portal-${{ github.ref_name }}-${{ matrix.target }}
+      BIN: target/${{ matrix.target }}/release
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
       - uses: actions/checkout@v4
       # rustup reads rust-toolchain.toml; the target is added to that toolchain.
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }} -p portal-cli -p portal-rendezvous
 
+      # --- Windows signing (optional) ---
+      - name: Upload unsigned programs for signing
+        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: |
+            ${{ env.BIN }}/portal.exe
+            ${{ env.BIN }}/portal-rendezvous.exe
+      - name: Sign with SignPath
+        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: portal
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - name: Use the signed programs
+        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        shell: pwsh
+        run: Copy-Item signed/*.exe $env:BIN -Force
+
+      # --- macOS signing and notarization (optional) ---
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 16)
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          for program in portal portal-rendezvous; do
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$BIN/$program"
+          done
+          # Bare programs cannot be stapled; Gatekeeper checks the ticket online.
+          ditto -c -k "$BIN/portal" "$BIN/portal-rendezvous" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $name = "portal-${{ github.ref_name }}-${{ matrix.target }}"
-          New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/portal.exe, target/${{ matrix.target }}/release/portal-rendezvous.exe, README.md, LICENSE-MIT, LICENSE-APACHE $name
-          Compress-Archive $name "$name.zip"
-          (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower() + "  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          New-Item -ItemType Directory $env:NAME | Out-Null
+          Copy-Item "$env:BIN/portal.exe", "$env:BIN/portal-rendezvous.exe", README.md, LICENSE-MIT, LICENSE-APACHE $env:NAME
+          Compress-Archive $env:NAME "$env:NAME.zip"
+          (Get-FileHash "$env:NAME.zip" -Algorithm SHA256).Hash.ToLower() + "  $env:NAME.zip" | Out-File -Encoding ascii "$env:NAME.zip.sha256"
+          "ARCHIVE=$env:NAME.zip" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          name="portal-${{ github.ref_name }}-${{ matrix.target }}"
-          mkdir "$name"
-          cp target/${{ matrix.target }}/release/portal target/${{ matrix.target }}/release/portal-rendezvous README.md LICENSE-MIT LICENSE-APACHE "$name"
-          tar czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          mkdir "$NAME"
+          cp "$BIN/portal" "$BIN/portal-rendezvous" README.md LICENSE-MIT LICENSE-APACHE "$NAME"
+          tar czf "$NAME.tar.gz" "$NAME"
+          shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+          echo "ARCHIVE=$NAME.tar.gz" >> "$GITHUB_ENV"
+
+      # Lets anyone check that an archive was built here from this tag:
+      #   gh attestation verify <archive> --repo MStefa003/portal
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: portal-${{ github.ref_name }}-${{ matrix.target }}.*
+          name: release-${{ matrix.target }}
+          path: ${{ env.NAME }}.*
 
   publish:
     needs: build
@@ -62,8 +136,42 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          path: dist
+          pattern: release-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: portal-*
+          files: dist/portal-*
           generate_release_notes: true
+
+      # Scoop bucket and Homebrew tap live in this repository; update them.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: repo
+      - name: Update the Scoop, Homebrew and winget manifests
+        working-directory: repo
+        run: |
+          python3 packaging/update_manifests.py "${{ github.ref_name }}" ../dist
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket Formula packaging/winget
+          git commit -m "packaging: ${{ github.ref_name }} manifests" || exit 0
+          git push
+
+  winget:
+    needs: publish
+    runs-on: windows-latest
+    env:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        if: env.WINGET_TOKEN != ''
+        with:
+          ref: main
+      - name: Submit to winget
+        if: env.WINGET_TOKEN != ''
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe submit --token $env:WINGET_TOKEN packaging/winget

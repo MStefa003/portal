@@ -8,8 +8,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use portal_core::{OverwritePolicy, ScanOptions, scan};
-use portal_net::{DhtNetwork, Discovery, NetError, NetMode, ReceiveOptions, Reporter};
+use portal_core::{OverwritePolicy, ScanOptions, Summary, scan};
+use portal_net::{
+    DhtNetwork, Discovery, NetError, NetMode, Payload, ReceiveOptions, Received, Reporter,
+    SecretKey, SendOptions,
+};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{Code, PAIR_ALPN, PakeError, PeerMsg};
 
@@ -35,6 +38,14 @@ fn options(dest: &Path) -> ReceiveOptions {
         dest: dest.to_path_buf(),
         overwrite: OverwritePolicy::Never,
         confirm: None,
+        rate_limit: None,
+    }
+}
+
+fn files(received: Received) -> Summary {
+    match received {
+        Received::Files(summary) => summary,
+        Received::Text(_) => panic!("expected files"),
     }
 }
 
@@ -55,17 +66,17 @@ async fn transfers_through_the_dht() {
         fs::create_dir_all(src.join("sub")).unwrap();
         fs::write(src.join("a.txt"), "found without a server").unwrap();
         fs::write(src.join("sub/b.bin"), vec![9u8; 1_500_000]).unwrap();
-        let manifest = scan(&src, &ScanOptions::default()).unwrap().manifest;
+        let payload = Payload::from(scan(&src, &ScanOptions::default()).unwrap());
 
         let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
         let code = Code::random().unwrap();
         let announcement =
             portal_net::discovery::announce(&sender, NetMode::Loopback, &code, &discovery);
         let send_code = code.clone();
-        let root = src.clone();
         let send = tokio::spawn(async move {
             let conn = portal_net::direct::accept(&sender, &send_code).await?;
-            let result = portal_net::send_on(&conn, &root, &manifest, quiet()).await;
+            let options = SendOptions::default();
+            let result = portal_net::send_on(&conn, &payload, &options, quiet()).await;
             sender.close().await;
             drop(announcement);
             result
@@ -81,9 +92,11 @@ async fn transfers_through_the_dht() {
             .await
             .unwrap();
         let dest = tmp.path().join("out");
-        let summary = portal_net::receive_on(&conn, options(&dest), quiet())
-            .await
-            .unwrap();
+        let summary = files(
+            portal_net::receive_on(&conn, options(&dest), quiet())
+                .await
+                .unwrap(),
+        );
         receiver.close().await;
         send.await.unwrap().unwrap();
 
@@ -218,6 +231,150 @@ async fn relaying_the_handshake_is_detected() {
         let (_sender, accepted) = accept.await.unwrap();
         assert!(matches!(accepted, Err(NetError::WrongPeer)), "{accepted:?}");
         relay.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+fn key(byte: u8) -> SecretKey {
+    SecretKey::from_bytes(&[byte; 32])
+}
+
+/// Two devices pair with a code and learn each other's node ID and name.
+#[tokio::test(flavor = "multi_thread")]
+async fn devices_pair_with_a_code() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let (_net, discovery) = testnet();
+        let desk = portal_net::bind_as(NetMode::Loopback, true, Some(key(1)))
+            .await
+            .unwrap();
+        let laptop = portal_net::bind_as(NetMode::Loopback, false, Some(key(2)))
+            .await
+            .unwrap();
+        let code = Code::random().unwrap();
+        let announcement =
+            portal_net::discovery::announce(&desk, NetMode::Loopback, &code, &discovery);
+        let shown = code.clone();
+        let accept = tokio::spawn(async move {
+            let paired = portal_net::trust::pair_accept(&desk, &shown, "desk").await;
+            drop(announcement);
+            desk.close().await;
+            paired
+        });
+
+        let addr = portal_net::discovery::find(&code, &discovery, FIND_TIMEOUT)
+            .await
+            .unwrap();
+        let joined = portal_net::trust::pair_join(&laptop, addr, &code, " laptop\n")
+            .await
+            .unwrap();
+        laptop.close().await;
+        let accepted = accept.await.unwrap().unwrap();
+
+        assert_eq!(joined.id, key(1).public());
+        assert_eq!(joined.name, "desk");
+        assert_eq!(accepted.id, key(2).public());
+        assert_eq!(accepted.name, "laptop");
+    })
+    .await
+    .unwrap();
+}
+
+/// A device that typed the wrong code is not paired.
+#[tokio::test]
+async fn pairing_needs_the_right_code() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let desk = portal_net::bind_as(NetMode::Loopback, true, Some(key(3)))
+            .await
+            .unwrap();
+        let addr = portal_net::local_addr(&desk, NetMode::Loopback).await;
+        let code = Code::random().unwrap();
+        let shown = code.clone();
+        let accept =
+            tokio::spawn(
+                async move { portal_net::trust::pair_accept(&desk, &shown, "desk").await },
+            );
+        let laptop = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let joined =
+            portal_net::trust::pair_join(&laptop, addr, &wrong_guess(&code), "laptop").await;
+        assert!(
+            matches!(joined, Err(NetError::Pake(PakeError::WrongCode))),
+            "{joined:?}"
+        );
+        let accepted = accept.await.unwrap();
+        assert!(
+            matches!(accepted, Err(NetError::Pake(PakeError::WrongCode))),
+            "{accepted:?}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// A trusted device receives without a code; another node is refused.
+#[tokio::test]
+async fn trusted_devices_need_no_code() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("notes.txt");
+        fs::write(&src, "between my own machines").unwrap();
+        let payload = Payload::from(scan(&src, &ScanOptions::default()).unwrap());
+        let no_lookup = Discovery {
+            mdns: false,
+            dht: None,
+        };
+
+        let desk = portal_net::bind_as(NetMode::Loopback, true, Some(key(4)))
+            .await
+            .unwrap();
+        let desk_addr = portal_net::local_addr(&desk, NetMode::Loopback).await;
+        let send = tokio::spawn(async move {
+            let conn = portal_net::accept_from(&desk, key(5).public()).await?;
+            let result =
+                portal_net::send_on(&conn, &payload, &SendOptions::default(), quiet()).await;
+            desk.close().await;
+            result
+        });
+
+        // Someone else who knows the address is turned away.
+        let stranger = portal_net::bind_as(NetMode::Loopback, false, Some(key(6)))
+            .await
+            .unwrap();
+        let refused = portal_net::trust::dial(
+            &stranger,
+            desk_addr.clone(),
+            &no_lookup,
+            Duration::from_secs(5),
+        )
+        .await;
+        if let Ok(conn) = refused {
+            let out = tmp.path().join("stolen");
+            assert!(
+                portal_net::receive_on(&conn, options(&out), quiet())
+                    .await
+                    .is_err()
+            );
+            assert!(!out.join("notes.txt").exists());
+        }
+
+        let laptop = portal_net::bind_as(NetMode::Loopback, false, Some(key(5)))
+            .await
+            .unwrap();
+        let conn = portal_net::trust::dial(&laptop, desk_addr, &no_lookup, FIND_TIMEOUT)
+            .await
+            .unwrap();
+        let dest = tmp.path().join("out");
+        files(
+            portal_net::receive_on(&conn, options(&dest), quiet())
+                .await
+                .unwrap(),
+        );
+        laptop.close().await;
+        send.await.unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("notes.txt")).unwrap(),
+            "between my own machines"
+        );
     })
     .await
     .unwrap();

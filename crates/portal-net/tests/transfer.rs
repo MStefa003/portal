@@ -8,8 +8,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use portal_core::{OverwritePolicy, ScanOptions, SinkError, scan};
-use portal_net::{EndpointAddr, Event, NetError, NetMode, ReceiveOptions, Reporter};
+use portal_core::{OverwritePolicy, ScanOptions, SinkError, Summary, scan, scan_many};
+use portal_net::{
+    EndpointAddr, Event, NetError, NetMode, Payload, ReceiveOptions, Received, Reporter,
+    SendOptions,
+};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
     Code, Control, DeclineReason, EncodedChunk, Encoding, MAX_CONTROL_FRAME, Offer, PakeError,
@@ -37,6 +40,13 @@ fn recording() -> (Reporter, Arc<Mutex<Vec<Event>>>) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     (Arc::new(move |e| sink.lock().unwrap().push(e)), events)
+}
+
+fn files(received: Result<Received, NetError>) -> Result<Summary, NetError> {
+    received.map(|r| match r {
+        Received::Files(summary) => summary,
+        Received::Text(_) => panic!("expected files"),
+    })
 }
 
 fn make_project(root: &Path) {
@@ -99,8 +109,11 @@ async fn run_transfer(
         dest: dest.to_path_buf(),
         overwrite,
         confirm: None,
+        rate_limit: None,
     };
-    run_transfer_with(src, options).await
+    let payload = Payload::from(scan(src, &ScanOptions::default()).unwrap());
+    let (sent, received, events) = run_payload(payload, SendOptions::default(), options).await;
+    (sent, files(received), events)
 }
 
 async fn run_transfer_with(
@@ -111,17 +124,26 @@ async fn run_transfer_with(
     Result<portal_core::Summary, NetError>,
     Vec<Event>,
 ) {
+    let payload = Payload::from(scan(src, &ScanOptions::default()).unwrap());
+    let (sent, received, events) = run_payload(payload, SendOptions::default(), options).await;
+    (sent, files(received), events)
+}
+
+/// Sends `payload` to a receiver paired through a rendezvous server.
+async fn run_payload(
+    payload: Payload,
+    send_options: SendOptions,
+    options: ReceiveOptions,
+) -> (Result<(), NetError>, Result<Received, NetError>, Vec<Event>) {
     let url = rendezvous().await;
-    let scan = scan(src, &ScanOptions::default()).unwrap();
     let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
     let waiting = portal_net::rendezvous::allocate(&url).await.unwrap();
     // Go through the text form, exactly as a person would type it.
     let code = Code::parse(&waiting.code().to_string()).unwrap();
 
-    let root = src.to_path_buf();
     let send = tokio::spawn(async move {
         let peer = waiting.pair(&sender, NetMode::Loopback).await?;
-        let result = portal_net::send(&sender, peer, &root, &scan.manifest, quiet()).await;
+        let result = portal_net::send(&sender, peer, &payload, &send_options, quiet()).await;
         sender.close().await;
         result
     });
@@ -156,6 +178,7 @@ async fn receiver_can_decline_the_offer() {
                 *seen.lock().unwrap() = Some(offer.name.clone());
                 false
             })),
+            rate_limit: None,
         };
         let (sent, received, _) = run_transfer_with(&src, options).await;
         assert!(matches!(
@@ -381,8 +404,9 @@ async fn receive_with(
         dest: dest.to_path_buf(),
         overwrite: OverwritePolicy::Never,
         confirm: None,
+        rate_limit: None,
     };
-    portal_net::receive(endpoint, addr, options, quiet()).await
+    files(portal_net::receive(endpoint, addr, options, quiet()).await)
 }
 
 #[tokio::test]
@@ -506,16 +530,16 @@ async fn sender_only_accepts_the_paired_receiver() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("f.txt");
         fs::write(&src, "for the right receiver only").unwrap();
-        let manifest = scan(&src, &ScanOptions::default()).unwrap().manifest;
+        let payload = Payload::from(scan(&src, &ScanOptions::default()).unwrap());
 
         let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
         let sender_addr = portal_net::local_addr(&sender, NetMode::Loopback).await;
         let receiver = portal_net::bind(NetMode::Loopback, false).await.unwrap();
         let peer = receiver.id();
-        let send =
-            tokio::spawn(
-                async move { portal_net::send(&sender, peer, &src, &manifest, quiet()).await },
-            );
+        let send = tokio::spawn(async move {
+            let options = SendOptions::default();
+            portal_net::send(&sender, peer, &payload, &options, quiet()).await
+        });
 
         let stranger = portal_net::bind(NetMode::Loopback, false).await.unwrap();
         let stolen = receive_with(&stranger, sender_addr.clone(), &tmp.path().join("x")).await;
@@ -530,6 +554,142 @@ async fn sender_only_accepts_the_paired_receiver() {
             fs::read_to_string(tmp.path().join("y/f.txt")).unwrap(),
             "for the right receiver only"
         );
+    })
+    .await
+    .unwrap();
+}
+
+fn receive_options(dest: &Path) -> ReceiveOptions {
+    ReceiveOptions {
+        dest: dest.to_path_buf(),
+        overwrite: OverwritePolicy::Never,
+        confirm: None,
+        rate_limit: None,
+    }
+}
+
+/// A text message arrives as text; nothing is written to disk.
+#[tokio::test]
+async fn sends_a_text_message() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("out");
+        let text = "https://example.com/ünïcode\nsecond line".to_owned();
+        let (sent, received, _) = run_payload(
+            Payload::Text(text.clone()),
+            SendOptions::default(),
+            receive_options(&dest),
+        )
+        .await;
+        sent.unwrap();
+        assert_eq!(received.unwrap(), Received::Text(text));
+        assert!(!dest.exists());
+    })
+    .await
+    .unwrap();
+}
+
+/// Several files and folders arrive side by side in one transfer.
+#[tokio::test]
+async fn sends_several_items_at_once() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("a/project");
+        make_project(&project);
+        let notes = tmp.path().join("elsewhere/notes.txt");
+        fs::create_dir_all(notes.parent().unwrap()).unwrap();
+        fs::write(&notes, "side by side").unwrap();
+        let dest = tmp.path().join("b");
+
+        let scan = scan_many(&[project.clone(), notes], &ScanOptions::default()).unwrap();
+        let (sent, received, events) = run_payload(
+            Payload::from(scan),
+            SendOptions::default(),
+            receive_options(&dest),
+        )
+        .await;
+        sent.unwrap();
+        assert_eq!(files(received).unwrap().files, 5);
+        same_tree(&project, &dest.join("project"));
+        assert_eq!(
+            fs::read_to_string(dest.join("notes.txt")).unwrap(),
+            "side by side"
+        );
+        let offered = events.iter().find_map(|e| match e {
+            Event::Offer(offer) => Some(offer.name.clone()),
+            _ => None,
+        });
+        assert_eq!(offered.as_deref(), Some("project and 1 more"));
+    })
+    .await
+    .unwrap();
+}
+
+/// A speed limit on the sender slows the transfer down to about that rate.
+#[tokio::test]
+async fn sender_speed_limit_is_respected() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("project");
+        make_project(&src);
+        let dest = tmp.path().join("out");
+
+        let begin = std::time::Instant::now();
+        let (sent, received, _) = run_payload(
+            Payload::from(scan(&src, &ScanOptions::default()).unwrap()),
+            SendOptions {
+                rate_limit: Some(2_000_000),
+            },
+            receive_options(&dest),
+        )
+        .await;
+        sent.unwrap();
+        files(received).unwrap();
+        same_tree(&src, &dest.join("project"));
+        // About 3 MB of random data cross the network; at 2 MB/s that is
+        // over a second even though the first chunk goes out at once.
+        let took = begin.elapsed();
+        assert!(took >= Duration::from_millis(700), "{took:?}");
+    })
+    .await
+    .unwrap();
+}
+
+/// A receiver that only speaks protocol 1 is told to update instead of
+/// getting something it cannot read.
+#[tokio::test]
+async fn old_receivers_are_told_to_update() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let sender = portal_net::bind(NetMode::Loopback, true).await.unwrap();
+        let addr = portal_net::local_addr(&sender, NetMode::Loopback).await;
+        let old = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let peer = old.id();
+        let send = tokio::spawn(async move {
+            let payload = Payload::Text("hi".into());
+            portal_net::send(&sender, peer, &payload, &SendOptions::default(), quiet()).await
+        });
+
+        let conn = old.connect(addr, portal_proto::ALPN).await.unwrap();
+        let (mut tx, mut rx) = conn.open_bi().await.unwrap();
+        write_msg(
+            &mut tx,
+            &Control::Hello {
+                version: 1,
+                min_version: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let _hello: Option<Control> = read_msg(&mut rx, MAX_CONTROL_FRAME).await.unwrap();
+        let next: Option<Control> = read_msg(&mut rx, MAX_CONTROL_FRAME).await.unwrap();
+        let Some(Control::Error { message, .. }) = next else {
+            panic!("expected an error, got {next:?}");
+        };
+        assert!(message.contains("update Portal"), "{message}");
+        conn.close(0u32.into(), b"bye");
+
+        let sent = send.await.unwrap();
+        assert!(matches!(sent, Err(NetError::PeerTooOld(_))), "{sent:?}");
     })
     .await
     .unwrap();

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
@@ -28,17 +28,22 @@ futures-util = { version = "0.3.34", default-features = false, features = ["sink
 getrandom = "0.4.3"
 ignore = "0.4.33"
 indicatif = "0.18.6"
-iroh = "1.4.0"
+iroh = { version = "1.4.0", features = ["unstable-net-report"] }
 mainline = { version = "8.0.1", default-features = false, features = ["async"] }
 mdns-sd = { version = "0.21.6", default-features = false, features = ["async"] }
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+# For `portal update`, with the TLS setup iroh already uses (no extra builds).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.1"
 spake2 = "0.4.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+webpki-roots = "1.0.10"
 zstd = "0.14.3"
 
 # Test-only.

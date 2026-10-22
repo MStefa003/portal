@@ -24,9 +24,13 @@ indicatif.workspace = true
 portal-core.workspace = true
 portal-net.workspace = true
 portal-proto.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 mainline.workspace = true
@@ -35,3 +39,16 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# `cargo binstall --git https://github.com/MStefa003/portal portal-cli`
+# downloads the release archive instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/portal-v{ version }-{ target }{ archive-suffix }"
+bin-dir = "portal-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"

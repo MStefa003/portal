@@ -56,6 +56,14 @@ try {
         Write-Host "Added $dest to your PATH. Open a new terminal to use it."
     }
     Write-Host "Installed: $dest\portal.exe"
+
+    # "Send with Portal" in Explorer's right-click menu, unless opted out.
+    if (-not $env:PORTAL_NO_CONTEXT_MENU) {
+        & "$dest\portal.exe" context-menu | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Added 'Send with Portal' to the right-click menu (remove it with: portal context-menu --remove)."
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force $tmp
 }

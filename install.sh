@@ -47,6 +47,7 @@ tar xzf "$file" -C "$tmp"
 mkdir -p "$dest"
 install -m 755 "$tmp"/portal-*/portal "$tmp"/portal-*/portal-rendezvous "$dest"
 echo "Installed: $dest/portal"
+echo "Run 'portal context-menu' to add 'Send with Portal' to your file manager's right-click menu."
 case ":$PATH:" in
   *":$dest:"*) ;;
   *) echo "Add $dest to your PATH to run 'portal' from anywhere." ;;

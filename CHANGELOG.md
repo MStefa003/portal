@@ -6,6 +6,39 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
+### Added
+- `portal send a b c` sends several files and folders as one transfer with
+  one code. They arrive side by side; their names must differ.
+- Text messages: `portal send --text "..."` (or `--text -` for standard
+  input) and `portal send --clipboard`. The receiver prints the text, made
+  safe for the terminal, or copies it with `portal receive --copy`.
+- Trusted devices: `portal pair` on one device and `portal pair <code>` on
+  the other, once. Then `portal send <files> --to <device>` and
+  `portal receive --from <device>` need no code. `portal devices` lists them,
+  `portal unpair` forgets one.
+- `portal doctor` checks the relay, UDP, NAT type, DHT, local discovery,
+  the rendezvous server (if set), the download folder and the version, and
+  explains what each result means for transfers.
+- `--limit <speed>` on `send` and `receive`, e.g. `--limit 5MB/s`.
+- `portal update` installs the newest release (checksum-verified);
+  `--check` only reports it, `--force` reinstalls. It refuses, with the
+  right command, when a package manager installed Portal.
+- `portal context-menu` adds "Send with Portal" to Explorer (plus
+  "Send to → Portal" for several items), a Finder Quick Action, or Nautilus
+  and Dolphin entries; `--remove` takes it away. The Windows installer adds
+  it, and the uninstallers remove it.
+- Distribution: Scoop bucket and Homebrew tap in this repository, winget
+  manifests, `cargo binstall` metadata, build provenance attestations for
+  every release archive, and optional Windows (SignPath) and macOS
+  (notarization) signing in the release workflow. See docs/RELEASING.md.
+
+### Changed
+- Protocol version 2 (still talks to version 1). Single files and folders
+  are sent exactly as before, so 0.2 receivers keep working; text and
+  several items need the receiver to update, and tell it so.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "description": "Send files and folders directly between two machines: peer-to-peer, end-to-end encrypted and resumable.",
+    "homepage": "https://github.com/MStefa003/portal",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/MStefa003/portal/releases/download/v0.2.0/portal-v0.2.0-x86_64-pc-windows-msvc.zip",
+            "hash": "76380a11d28635b6151edc66feb08e0faba5d36c0c8a3f689958beda23c90f96",
+            "extract_dir": "portal-v0.2.0-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/MStefa003/portal/releases/download/v0.2.0/portal-v0.2.0-aarch64-pc-windows-msvc.zip",
+            "hash": "f444abae904de927435d5bd28f917a628236a8b37c70536602629b54e7f1fefd",
+            "extract_dir": "portal-v0.2.0-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": [
+        "portal.exe",
+        "portal-rendezvous.exe"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/MStefa003/portal/releases/download/v$version/portal-v$version-x86_64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                },
+                "extract_dir": "portal-v$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/MStefa003/portal/releases/download/v$version/portal-v$version-aarch64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                },
+                "extract_dir": "portal-v$version-aarch64-pc-windows-msvc"
+            }
+        }
+    }
+}

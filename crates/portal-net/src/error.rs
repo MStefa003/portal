@@ -36,6 +36,9 @@ pub enum NetError {
     /// Nobody announced the code's number on the local network or the DHT.
     #[error("no sender found for this code")]
     SenderNotFound,
+    /// A trusted device could not be reached in time.
+    #[error("the device could not be reached")]
+    DeviceNotFound,
     /// The other peer left the rendezvous before the handshake finished.
     #[error("the other side disconnected before the handshake finished")]
     PeerLeft,
@@ -51,6 +54,14 @@ pub enum NetError {
     /// The peers have no protocol version in common.
     #[error(transparent)]
     Version(#[from] VersionError),
+    /// The receiver's Portal is too old for what is being sent.
+    #[error(
+        "the receiver runs an older Portal that cannot receive {0}. Please update Portal there."
+    )]
+    PeerTooOld(&'static str),
+    /// The text message is larger than the protocol allows.
+    #[error("the text is too long (at most {} kB)", portal_proto::MAX_TEXT / 1000)]
+    TextTooLong,
     /// The peer sent something the protocol does not allow at this point.
     #[error("the other side broke the protocol: {0}")]
     Protocol(String),

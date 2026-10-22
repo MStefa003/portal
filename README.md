@@ -15,9 +15,9 @@ Receiving "project" (1,284 files, 2.3 GB) from 192.168.1.20 [direct]
 [████████████░░░░░░░░] 61%  48 MB/s  ETA 0:19
 ```
 
-> **Status:** early development (milestone M4). Transfers work end to end
-> with short codes, with no server to set up, and pick up where they left
-> off when interrupted.
+> **Status:** early development. Transfers work end to end with short
+> codes, with no server to set up, and pick up where they left off when
+> interrupted.
 
 ## Try it
 
@@ -65,6 +65,71 @@ transfer, so nobody gets a second try.
 If your network blocks this (some corporate networks block outgoing UDP),
 you can pair through a [rendezvous server](docs/SELF_HOSTING.md) you run
 yourself instead, with `--rendezvous wss://…/v1` or `PORTAL_RENDEZVOUS`.
+`portal doctor` checks what works on the network you are on.
+
+### Several files, text and the clipboard
+
+```console
+$ portal send report.pdf photos/ notes.txt     # one transfer, one code
+$ portal send --text "https://example.com/meeting"
+$ portal send --clipboard                      # whatever text you copied
+$ some-command | portal send --text -          # text from a pipe
+```
+
+The receiver runs `portal receive <code>` as usual. Text is printed, or with
+`--copy` put on the receiver's clipboard instead (handy for passwords).
+
+### Your own devices, without a code
+
+Pair two machines once:
+
+```console
+desk$   portal pair
+Pairing code: 3318472-oak-lemon
+laptop$ portal pair 3318472-oak-lemon
+✓ Paired with desk. This device is "laptop" to it.
+```
+
+From then on, no codes:
+
+```console
+desk$   portal send ./project --to laptop
+laptop$ portal receive --from desk
+```
+
+`portal devices` lists paired devices and `portal unpair <name>` forgets one.
+The receiver is still asked before anything is saved.
+
+### Right-click "Send with Portal"
+
+```console
+portal context-menu            # add it (the Windows installer already did)
+portal context-menu --remove   # take it away
+```
+
+On Windows it appears for files and folders (on Windows 11 under "Show more
+options"), and "Send to → Portal" sends several selected items at once. On
+macOS it is a Finder Quick Action; on Linux, a Nautilus script and a Dolphin
+service menu. A terminal window opens with the code and stays until the
+transfer is done. (The macOS and Linux versions are new and less tested than
+the Windows one.)
+
+### Speed limit
+
+```console
+portal send big.iso --limit 5MB/s
+portal receive 4821937-cedar-river --limit 500k
+```
+
+### Updating
+
+```console
+portal update           # installs the newest release
+portal update --check   # only says whether there is one
+```
+
+When Portal came from a package manager, use that instead; `portal update`
+tells you which.
 
 ## Goals
 
@@ -98,8 +163,22 @@ macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/install.sh | sh
 ```
 
+Both scripts check the download's SHA-256 before installing. The Windows
+one also adds "Send with Portal" to the right-click menu (set
+`PORTAL_NO_CONTEXT_MENU=1` first to skip that).
+
+With a package manager:
+
+```console
+scoop bucket add portal https://github.com/MStefa003/portal; scoop install portal   # Windows
+brew tap mstefa003/portal https://github.com/MStefa003/portal; brew install portal  # macOS, Linux
+cargo binstall --git https://github.com/MStefa003/portal portal-cli                 # anywhere
+```
+
 Or download an archive from the [Releases](https://github.com/MStefa003/portal/releases)
-page. Both scripts check the download's SHA-256 before installing.
+page. Every archive has a SHA-256 file and a build provenance attestation:
+`gh attestation verify <archive> --repo MStefa003/portal` proves it was built
+by this repository's release workflow.
 
 ## Uninstalling
 
@@ -115,7 +194,8 @@ macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/uninstall.sh | sh
 ```
 
-This removes Portal only; files you sent or received stay where they are.
+This removes Portal and its right-click menu entries; files you sent or
+received stay where they are, and so do your settings and paired devices.
 
 ## Building
 
@@ -123,7 +203,9 @@ This removes Portal only; files you sent or received stay where they are.
 cargo build --release
 ```
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is
+pushed; see [docs/RELEASING.md](docs/RELEASING.md), which also covers code
+signing and the package managers.
 
 On Windows you need the MSVC toolchain ("Build Tools for Visual Studio" with
 the *Desktop development with C++* workload). If you build from Git Bash and

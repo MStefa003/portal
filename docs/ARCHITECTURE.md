@@ -67,6 +67,28 @@ still has to pass the handshake, and gets one guess.
 
    That closes the gap a man-in-the-middle at the rendezvous server would need.
 
+## Trusted devices (`portal pair`)
+
+Typing a code every time is unnecessary between one's own machines. Each
+device has a long-term iroh key in its settings folder (`identity`), used
+only for pairing and for transfers between paired devices; code transfers
+keep using a fresh key each time, so they cannot be linked to a device.
+
+1. `portal pair` on one device shows a code; `portal pair <code>` on the
+   other finds it like a receiver would. The code handshake runs over ALPN
+   `portal-trust/1` and proves both long-term node IDs. Then each side
+   sends a name for itself, and both store the other's node ID and name.
+2. Later, `portal send <files> --to laptop` binds with the device key and
+   accepts a connection from laptop's node ID only. `portal receive --from
+   desk` binds with its own key and dials desk's node ID, found by mDNS on
+   the same network or through iroh's address lookup (n0's DNS) elsewhere.
+   TLS authenticates both IDs; the transfer runs as usual, and the receiver
+   still confirms before anything is written.
+
+Pairing grants no more than a code would: a paired device can only offer a
+transfer while the other side is running `portal receive --from` it.
+`portal unpair` forgets a device.
+
 ### Threat model
 
 | Attacker | Can | Cannot |
@@ -77,6 +99,7 @@ still has to pass the handshake, and gets one guess.
 | Network observer | see that two hosts talk QUIC (and to which relay) | read anything: TLS 1.3 inside QUIC |
 | iroh relay operator | see node IDs and encrypted traffic volume | read or alter traffic |
 | Someone guessing codes | take one guess per code (1 in 1.68 M) and make that transfer fail | try again on the same code |
+| Someone with a stolen settings folder | act as that device towards its paired devices | do anything without a paired device running `portal receive --from` it |
 | Malicious sender | send arbitrary bytes | write outside the destination, overwrite without consent, exhaust memory (see below) |
 
 ## Transfer flow

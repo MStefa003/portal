@@ -7,7 +7,8 @@
 //!
 //! Invariants (enforced by [`Manifest::validate`], which runs on every
 //! manifest decoded from bytes):
-//! - every path is a [`SafeRelPath`] and the first entry is the single root,
+//! - every path is a [`SafeRelPath`] and the first entry is a root (a
+//!   top-level entry); version 1 manifests have exactly one root,
 //! - each entry's parent directory appears earlier in the list,
 //! - no two paths collide, even case-insensitively,
 //! - each file's chunk lengths are in range and sum to its size.
@@ -21,8 +22,11 @@ use crate::chunk::{ChunkRef, MAX_CHUNK_SIZE};
 use crate::hash::Hash;
 use crate::path::SafeRelPath;
 
-/// Version of the manifest format.
+/// Version of the manifest format with a single top-level entry. Kept for
+/// single-root manifests so that older Portal versions can receive them.
 pub const MANIFEST_VERSION: u16 = 1;
+/// Version of the manifest format that allows several top-level entries.
+pub const MANIFEST_VERSION_MULTI: u16 = 2;
 /// Maximum number of entries (files plus directories) in one manifest.
 pub const MAX_ENTRIES: usize = 1_000_000;
 /// Maximum encoded size of a manifest received from the network.
@@ -31,7 +35,7 @@ pub const MAX_MANIFEST_BYTES: usize = 256 * 1024 * 1024;
 /// A complete description of a file or folder being transferred.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Format version; see [`MANIFEST_VERSION`].
+    /// Format version; see [`MANIFEST_VERSION`] and [`MANIFEST_VERSION_MULTI`].
     pub version: u16,
     /// All entries, root first, parents before children.
     pub entries: Vec<Entry>,
@@ -126,7 +130,9 @@ impl Timestamp {
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     /// The peer uses a manifest format we do not understand.
-    #[error("unsupported manifest version {found} (this build understands {MANIFEST_VERSION})")]
+    #[error(
+        "unsupported manifest version {found} (this build understands up to {MANIFEST_VERSION_MULTI})"
+    )]
     UnsupportedVersion {
         /// The version found in the manifest.
         found: u16,
@@ -140,7 +146,7 @@ pub enum ManifestError {
     /// The encoded manifest is larger than [`MAX_MANIFEST_BYTES`].
     #[error("the manifest is larger than {MAX_MANIFEST_BYTES} bytes")]
     TooLarge,
-    /// The manifest has more than one top-level entry.
+    /// A version 1 manifest has more than one top-level entry.
     #[error("the manifest has more than one top-level entry (`{0}`)")]
     MultipleRoots(SafeRelPath),
     /// Two entries have the same path, possibly differing only in case.
@@ -164,22 +170,48 @@ pub enum ManifestError {
 }
 
 impl Manifest {
-    /// The top-level name (folder or file name) of the transfer.
+    /// The manifest version to use for `roots` top-level entries: the old
+    /// format when it suffices, so older receivers keep working.
+    pub fn version_for(roots: usize) -> u16 {
+        if roots > 1 {
+            MANIFEST_VERSION_MULTI
+        } else {
+            MANIFEST_VERSION
+        }
+    }
+
+    /// The top-level name (folder or file name) of the transfer, or of its
+    /// first item when it has several.
     pub fn name(&self) -> &str {
         self.entries
             .first()
             .map_or("", |e| e.path.first_component())
     }
 
-    /// Whether the transfer is a single file rather than a folder.
+    /// The name to show for the transfer: [`Self::name`], or e.g.
+    /// "photos and 2 more" when it has several top-level items.
+    pub fn display_name(&self) -> String {
+        match self.root_count() {
+            0 | 1 => self.name().to_owned(),
+            n => format!("{} and {} more", self.name(), n - 1),
+        }
+    }
+
+    /// The top-level entries, in order.
+    pub fn roots(&self) -> impl Iterator<Item = &Entry> {
+        self.entries
+            .iter()
+            .filter(|e| !e.path.as_str().contains('/'))
+    }
+
+    /// Number of top-level entries.
+    pub fn root_count(&self) -> usize {
+        self.roots().count()
+    }
+
+    /// Whether the transfer is a single file rather than a folder or several items.
     pub fn is_single_file(&self) -> bool {
-        matches!(
-            self.entries.first(),
-            Some(Entry {
-                kind: EntryKind::File(_),
-                ..
-            })
-        )
+        self.entries.len() == 1 && matches!(self.entries[0].kind, EntryKind::File(_))
     }
 
     /// Iterates over files as `(entry index, entry, file metadata)`.
@@ -228,7 +260,7 @@ impl Manifest {
 
     /// Checks all structural invariants (see the module docs).
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.version != MANIFEST_VERSION {
+        if self.version != MANIFEST_VERSION && self.version != MANIFEST_VERSION_MULTI {
             return Err(ManifestError::UnsupportedVersion {
                 found: self.version,
             });
@@ -248,7 +280,7 @@ impl Manifest {
                 return Err(ManifestError::Duplicate(path.clone()));
             }
             match path.parent() {
-                None if i == 0 => {}
+                None if i == 0 || self.version == MANIFEST_VERSION_MULTI => {}
                 None => return Err(ManifestError::MultipleRoots(path.clone())),
                 Some(parent) if dirs.contains(parent.as_str()) => {}
                 Some(_) => return Err(ManifestError::MissingParent(path.clone())),
@@ -397,6 +429,26 @@ mod tests {
     fn rejects_multiple_roots() {
         let m = manifest(vec![dir("a"), dir("b")]);
         assert!(matches!(m.validate(), Err(ManifestError::MultipleRoots(_))));
+    }
+
+    #[test]
+    fn version_2_allows_several_roots() {
+        let mut m = manifest(vec![
+            dir("a"),
+            file("a/x", b"1"),
+            file("b.txt", b"22"),
+            dir("c"),
+        ]);
+        m.version = MANIFEST_VERSION_MULTI;
+        m.validate().unwrap();
+        assert_eq!(m.root_count(), 3);
+        assert_eq!(m.display_name(), "a and 2 more");
+        assert!(!m.is_single_file());
+        assert_eq!(m.total_bytes(), 3);
+
+        let mut m = manifest(vec![dir("a"), file("A", b"1")]);
+        m.version = MANIFEST_VERSION_MULTI;
+        assert!(matches!(m.validate(), Err(ManifestError::Duplicate(_))));
     }
 
     #[test]

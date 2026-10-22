@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, RelayMode, TransportAddr};
-use portal_proto::{ALPN, PAIR_ALPN};
+use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
+use portal_proto::{ALPN, PAIR_ALPN, TRUST_ALPN};
 
 use crate::error::NetError;
 use crate::event::Route;
@@ -23,9 +23,20 @@ pub enum NetMode {
     Loopback,
 }
 
-/// Creates an endpoint. A sender (`listen = true`) accepts Portal connections,
-/// both direct ([`PAIR_ALPN`]) and paired by a rendezvous server ([`ALPN`]).
+/// Creates an endpoint with a new random identity. A sender (`listen =
+/// true`) accepts Portal connections: direct ([`PAIR_ALPN`]), paired by a
+/// rendezvous server or trusted ([`ALPN`]), and device pairing ([`TRUST_ALPN`]).
 pub async fn bind(mode: NetMode, listen: bool) -> Result<Endpoint, NetError> {
+    bind_as(mode, listen, None).await
+}
+
+/// Like [`bind`], with the identity `key` if given: a device's long-term
+/// key, so that devices it was paired with recognize it.
+pub async fn bind_as(
+    mode: NetMode,
+    listen: bool,
+    key: Option<SecretKey>,
+) -> Result<Endpoint, NetError> {
     let builder = match mode {
         NetMode::Internet => Endpoint::builder(presets::N0),
         NetMode::Loopback => Endpoint::builder(presets::Minimal)
@@ -36,9 +47,13 @@ pub async fn bind(mode: NetMode, listen: bool) -> Result<Endpoint, NetError> {
             .map_err(NetError::bind)?,
     };
     let alpns = if listen {
-        vec![PAIR_ALPN.to_vec(), ALPN.to_vec()]
+        vec![PAIR_ALPN.to_vec(), ALPN.to_vec(), TRUST_ALPN.to_vec()]
     } else {
         vec![]
+    };
+    let builder = match key {
+        Some(key) => builder.secret_key(key),
+        None => builder,
     };
     builder.alpns(alpns).bind().await.map_err(NetError::bind)
 }

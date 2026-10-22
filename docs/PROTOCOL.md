@@ -1,6 +1,10 @@
 # Portal wire protocol
 
-Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
+Current protocol version: **2** (`portal_proto::PROTOCOL_VERSION`); the
+oldest one still spoken is 1 (`MIN_PROTOCOL_VERSION`). Version 2 adds text
+messages and manifests with several top-level items; a sender only uses
+them when the negotiated version is 2 and otherwise tells the receiver to
+update (see [Peer protocol](#peer-protocol-version-2)).
 
 > Status: draft. All three layers are specified below. Until the first
 > release the protocol may change without notice.
@@ -27,6 +31,9 @@ Current protocol version: **1** (`portal_proto::PROTOCOL_VERSION`).
 3. **Peer** (iroh QUIC): a control stream plus parallel data streams carrying
    chunks. With discovery it follows the handshake on the same connection;
    with rendezvous it is a new connection with ALPN `portal/1`.
+
+Paired ("trusted") devices skip layers 1 and 2 after pairing once; see
+[Device pairing](#device-pairing).
 
 ## Codes
 
@@ -97,6 +104,32 @@ The sender handles one pairing connection at a time:
 
 After the handshake, both finish the pairing stream, and the receiver opens
 the control stream of the peer protocol on the same connection.
+
+## Device pairing
+
+`portal pair` makes two devices recognize each other later without a code.
+Each device has a long-term iroh secret key (its node ID is the public key),
+created on first use and kept in its settings folder.
+
+Pairing works like [direct pairing](#direct-pairing-default) with ALPN
+`portal-trust/1`: the device that shows the code announces its nameplate
+and accepts; the other finds it and dials. After the handshake has proven
+both node IDs, the dialing device opens a second bidirectional stream and
+sends a `Device { name: String }` frame (postcard, at most 1 KiB); the other
+answers with its own and finishes. Names are untrusted: control characters
+are escaped and they are cut to 64 bytes. Each side stores the other's node
+ID with its name.
+
+To send to a paired device, the sender binds with its long-term key and
+waits for a connection with ALPN `portal/1` **from that device's node ID
+only**; anything else is closed. The receiver binds with its own key and
+dials the sender's node ID: found on the local network through mDNS
+(service `_portal._udp.local.`, instance `portal-device-<short node ID>`,
+TXT `id` checked against the expected ID) and across the internet through
+iroh's address lookup (n0's pkarr/DNS service publishes the node's relay).
+TLS authenticates both node IDs, so no code is involved. The peer protocol
+then runs on that connection as usual, including the receiver's choice to
+accept or decline.
 
 ## Rendezvous protocol (version 1, opt-in)
 
@@ -181,7 +214,7 @@ The rendezvous server cannot read or alter the identities without the code
 words, so it cannot place itself in the middle. The most it can do is refuse
 service.
 
-## Manifest (format version 1)
+## Manifest (format versions 1 and 2)
 
 The manifest is sent once, from sender to receiver, and describes everything
 being transferred. It is a postcard-encoded `portal_core::Manifest`:
@@ -222,9 +255,9 @@ A receiver rejects the whole manifest unless all of the following hold:
 | Rule | Limit / check |
 |---|---|
 | Encoded size | at most 256 MiB, checked before decoding |
-| `version` | equal to 1 |
+| `version` | 1 or 2 |
 | Entry count | 1 to 1,000,000 |
-| Root | exactly one entry with a one-component path, and it comes first |
+| Roots | the first entry has a one-component path; version 1 has no other such entry, version 2 may have more |
 | Order | each entry's parent is a `Dir` listed earlier |
 | Uniqueness | no two paths equal after Unicode lowercasing |
 | Chunks | every `len` in 1..=1 MiB, and the lens sum to `size` |
@@ -248,7 +281,13 @@ component is at most 255 bytes, and:
 These rules apply on every OS, so a manifest valid anywhere can be written
 anywhere. Senders skip (and report) entries that do not satisfy them.
 
-## Peer protocol (version 1)
+**Several items.** Sending several files or folders at once produces one
+manifest with one top-level entry per item (format version 2). Their names
+must differ, ignoring case. A manifest with a single root keeps version 1,
+so older receivers can still read it. The `Offer.name` of a version 2
+manifest is "*first name* and *n* more".
+
+## Peer protocol (version 2)
 
 One QUIC connection over iroh, ALPN `portal/1`. The receiver dials the
 sender. iroh authenticates both ends by their node keys (TLS with raw
@@ -277,6 +316,7 @@ public keys), so the receiver knows it reached the node ID it dialed.
 | 6 | `WantDone` | R→S | no more `Want`s |
 | 7 | `Done` | R→S | everything received and verified |
 | 8 | `Error { code, message }` | both | failure; `message` is untrusted text |
+| 9 | `Text(string)` | S→R | instead of `Offer` (version 2): a text message, at most 256 KiB; answered by `Done` or `Decline` |
 
 The numbers are postcard variant indices. **`Hello` stays variant 0
 forever**, so any two versions can read each other's `Hello` and fail with a
@@ -297,6 +337,18 @@ receiver                                  sender
    │── Done ─────────────────────────────►│
    │◄─────────────────────── close(0) ────│
 ```
+
+A text message replaces everything after `Hello` with one `Text`, which the
+receiver answers with `Done`. Receivers escape control characters before
+showing it in a terminal.
+
+If the negotiated version is 1 and the sender has text or several items to
+send, it sends `Error` with a message asking the receiver to update, and
+stops.
+
+Either side may pace its data streams to a speed limit (`--limit`); the
+receiver does so by reading more slowly, which QUIC flow control passes on
+to the sender. Nothing about this is on the wire.
 
 **Version negotiation.** Each side sends `Hello` and reads the peer's. A peer
 is compatible if `peer.version >= our min` and `peer.min_version <= our

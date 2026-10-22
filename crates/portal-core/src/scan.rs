@@ -1,4 +1,4 @@
-//! Building a [`Manifest`] from a file or folder on disk (sender side).
+//! Building a [`Manifest`] from files and folders on disk (sender side).
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 
 use crate::chunk::chunk_reader;
-use crate::manifest::{
-    Entry, EntryKind, FileMeta, MANIFEST_VERSION, Manifest, ManifestError, Timestamp,
-};
+use crate::manifest::{Entry, EntryKind, FileMeta, Manifest, ManifestError, Timestamp};
 use crate::path::{PARTIAL_DIR_NAME, PathError, SafeRelPath};
 
 /// Options for [`scan`].
@@ -26,6 +24,9 @@ pub struct ScanOptions {
 pub struct Scan {
     /// The manifest describing what will be sent.
     pub manifest: Manifest,
+    /// The scanned paths on disk, one per top-level entry of the manifest
+    /// and in the same order (for [`crate::Source::new`]).
+    pub roots: Vec<PathBuf>,
     /// Entries that could not be included, with the reason.
     pub skipped: Vec<Skipped>,
 }
@@ -64,6 +65,12 @@ pub enum ScanError {
     /// The path is neither a regular file nor a directory.
     #[error("`{}` is not a regular file or folder", .0.display())]
     Unsupported(PathBuf),
+    /// Two of the paths to send have the same name (ignoring letter case).
+    #[error("`{}` has the same name as another item being sent; rename one or send them separately", .0.display())]
+    DuplicateName(PathBuf),
+    /// No paths were given.
+    #[error("nothing to send")]
+    Nothing,
     /// The resulting manifest is invalid (e.g. too many entries).
     #[error(transparent)]
     Manifest(#[from] ManifestError),
@@ -75,6 +82,46 @@ pub enum ScanError {
 /// that are invalid on some OS, names that collide when case is ignored,
 /// unreadable files) are left out and reported in [`Scan::skipped`].
 pub fn scan(root: &Path, options: &ScanOptions) -> Result<Scan, ScanError> {
+    scan_many(&[root.to_path_buf()], options)
+}
+
+/// Like [`scan`], for several files and folders sent together: each becomes
+/// a top-level entry of one manifest. Their names must differ.
+pub fn scan_many(roots: &[PathBuf], options: &ScanOptions) -> Result<Scan, ScanError> {
+    if roots.is_empty() {
+        return Err(ScanError::Nothing);
+    }
+    let mut entries = Vec::new();
+    let mut skipped = Vec::new();
+    let mut collision_keys = HashSet::new();
+    for root in roots {
+        scan_root(
+            root,
+            options,
+            &mut entries,
+            &mut skipped,
+            &mut collision_keys,
+        )?;
+    }
+    let manifest = Manifest {
+        version: Manifest::version_for(roots.len()),
+        entries,
+    };
+    manifest.validate()?;
+    Ok(Scan {
+        manifest,
+        roots: roots.to_vec(),
+        skipped,
+    })
+}
+
+fn scan_root(
+    root: &Path,
+    options: &ScanOptions,
+    entries: &mut Vec<Entry>,
+    skipped: &mut Vec<Skipped>,
+    collision_keys: &mut HashSet<String>,
+) -> Result<(), ScanError> {
     let io_err = |source| ScanError::Io {
         path: root.to_path_buf(),
         source,
@@ -91,9 +138,10 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<Scan, ScanError> {
             source,
         }
     })?;
+    if !collision_keys.insert(root_path.collision_key()) {
+        return Err(ScanError::DuplicateName(root.to_path_buf()));
+    }
 
-    let mut entries = Vec::new();
-    let mut skipped = Vec::new();
     if meta.is_file() {
         let file = file_meta(root, &meta).map_err(io_err)?;
         entries.push(Entry {
@@ -105,17 +153,11 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<Scan, ScanError> {
             path: root_path.clone(),
             kind: EntryKind::Dir,
         });
-        walk(root, &root_path, options, &mut entries, &mut skipped);
+        walk(root, &root_path, options, entries, skipped, collision_keys);
     } else {
         return Err(ScanError::Unsupported(root.to_path_buf()));
     }
-
-    let manifest = Manifest {
-        version: MANIFEST_VERSION,
-        entries,
-    };
-    manifest.validate()?;
-    Ok(Scan { manifest, skipped })
+    Ok(())
 }
 
 fn walk(
@@ -124,6 +166,7 @@ fn walk(
     options: &ScanOptions,
     entries: &mut Vec<Entry>,
     skipped: &mut Vec<Skipped>,
+    collision_keys: &mut HashSet<String>,
 ) {
     let mut builder = WalkBuilder::new(root);
     builder
@@ -144,7 +187,6 @@ fn walk(
             .require_git(false);
     }
 
-    let mut collision_keys = HashSet::from([root_path.collision_key()]);
     let mut skipped_dirs: Vec<PathBuf> = Vec::new();
 
     for result in builder.build() {
@@ -372,6 +414,47 @@ mod tests {
         let scan = scan(&root, &ScanOptions::default()).unwrap();
         assert_eq!(scan.manifest.entries.len(), 2);
         assert_eq!(scan.skipped.len(), 1);
+    }
+
+    #[test]
+    fn scans_several_items_into_one_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("photos");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.jpg"), "aa").unwrap();
+        let file = tmp.path().join("notes.txt");
+        fs::write(&file, "n").unwrap();
+
+        let scan = scan_many(&[file.clone(), folder.clone()], &ScanOptions::default()).unwrap();
+        assert_eq!(paths(&scan), ["notes.txt", "photos", "photos/a.jpg"]);
+        assert_eq!(scan.roots, [file, folder]);
+        assert_eq!(
+            scan.manifest.version,
+            crate::manifest::MANIFEST_VERSION_MULTI
+        );
+        assert_eq!(scan.manifest.root_count(), 2);
+
+        let one = scan_many(&[tmp.path().join("notes.txt")], &ScanOptions::default()).unwrap();
+        assert_eq!(one.manifest.version, crate::manifest::MANIFEST_VERSION);
+    }
+
+    #[test]
+    fn items_with_the_same_name_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        for dir in ["x", "y"] {
+            fs::create_dir(tmp.path().join(dir)).unwrap();
+            fs::write(tmp.path().join(dir).join("Same.txt"), dir).unwrap();
+        }
+        let err = scan_many(
+            &[tmp.path().join("x/Same.txt"), tmp.path().join("y/Same.txt")],
+            &ScanOptions::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ScanError::DuplicateName(_)));
+        assert!(matches!(
+            scan_many(&[], &ScanOptions::default()),
+            Err(ScanError::Nothing)
+        ));
     }
 
     #[test]

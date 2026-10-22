@@ -33,6 +33,15 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Sender: waits for a receiver that proves it knows `code`, and returns
 /// its connection. Fails as soon as one attempt uses the wrong code.
 pub async fn accept(endpoint: &Endpoint, code: &Code) -> Result<Connection, NetError> {
+    accept_alpn(endpoint, code, PAIR_ALPN).await
+}
+
+/// [`accept`] for connections using `alpn`.
+pub(crate) async fn accept_alpn(
+    endpoint: &Endpoint,
+    code: &Code,
+    alpn: &[u8],
+) -> Result<Connection, NetError> {
     loop {
         let incoming = endpoint
             .accept()
@@ -45,7 +54,7 @@ pub async fn accept(endpoint: &Endpoint, code: &Code) -> Result<Connection, NetE
                 continue;
             }
         };
-        if conn.alpn() != PAIR_ALPN {
+        if conn.alpn() != alpn {
             conn.close(2u32.into(), b"pair first");
             continue;
         }
@@ -105,9 +114,19 @@ pub async fn connect(
     sender: EndpointAddr,
     code: &Code,
 ) -> Result<Connection, NetError> {
+    connect_alpn(endpoint, sender, code, PAIR_ALPN).await
+}
+
+/// [`connect`] using `alpn`.
+pub(crate) async fn connect_alpn(
+    endpoint: &Endpoint,
+    sender: EndpointAddr,
+    code: &Code,
+    alpn: &[u8],
+) -> Result<Connection, NetError> {
     let expected = sender.id;
     let conn = endpoint
-        .connect(sender, PAIR_ALPN)
+        .connect(sender, alpn)
         .await
         .map_err(NetError::connect)?;
     if conn.remote_id() != expected {

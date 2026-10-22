@@ -11,13 +11,15 @@ use portal_core::manifest::MAX_MANIFEST_BYTES;
 use portal_core::{Hash, Manifest, OverwritePolicy, Sink, SinkError, Summary};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
-    ALPN, Control, DeclineReason, EncodedChunk, MAX_CONTROL_FRAME, Offer, WANT_BATCH, sanitize,
+    ALPN, Control, DeclineReason, EncodedChunk, MAX_CONTROL_FRAME, MAX_TEXT, Offer, WANT_BATCH,
+    sanitize,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::error::NetError;
 use crate::event::{Event, Reporter};
+use crate::limit::{self, RateLimit};
 use crate::{endpoint, hang_up, hello};
 
 /// How long to wait for the sender to close after we said `Done`.
@@ -38,6 +40,17 @@ pub struct ReceiveOptions {
     pub overwrite: OverwritePolicy,
     /// Asked before anything is written; `None` accepts every offer.
     pub confirm: Option<Confirm>,
+    /// At most this many bytes per second on the network; `None` for no limit.
+    pub rate_limit: Option<u64>,
+}
+
+/// What was received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Received {
+    /// Files and folders, now in the destination folder.
+    Files(Summary),
+    /// A text message (untrusted: may contain terminal control characters).
+    Text(String),
 }
 
 impl fmt::Debug for ReceiveOptions {
@@ -46,6 +59,7 @@ impl fmt::Debug for ReceiveOptions {
             .field("dest", &self.dest)
             .field("overwrite", &self.overwrite)
             .field("confirm", &self.confirm.is_some())
+            .field("rate_limit", &self.rate_limit)
             .finish()
     }
 }
@@ -57,7 +71,7 @@ pub async fn receive(
     sender: EndpointAddr,
     options: ReceiveOptions,
     reporter: Reporter,
-) -> Result<Summary, NetError> {
+) -> Result<Received, NetError> {
     let expected = sender.id;
     let conn = endpoint
         .connect(sender, ALPN)
@@ -78,7 +92,7 @@ pub async fn receive_on(
     conn: &Connection,
     options: ReceiveOptions,
     reporter: Reporter,
-) -> Result<Summary, NetError> {
+) -> Result<Received, NetError> {
     reporter(Event::Connected {
         peer: conn.remote_id().fmt_short().to_string(),
         route: endpoint::route(conn),
@@ -100,16 +114,31 @@ async fn run(
     conn: &Connection,
     options: ReceiveOptions,
     reporter: &Reporter,
-) -> Result<Summary, NetError> {
+) -> Result<Received, NetError> {
     let (mut tx, mut rx) = conn.open_bi().await.map_err(NetError::connection)?;
     hello(&mut tx, &mut rx).await?;
-    let (offer, manifest) = read_offer(&mut rx).await?;
+    let offer = match read_msg(&mut rx, MAX_CONTROL_FRAME).await? {
+        Some(Control::Offer(offer)) => offer,
+        Some(Control::Text(text)) => {
+            if text.len() > MAX_TEXT {
+                return Err(NetError::Protocol("the text is too long".into()));
+            }
+            write_msg(&mut tx, &Control::Done).await?;
+            tx.finish().map_err(NetError::connection)?;
+            return Ok(Received::Text(text));
+        }
+        Some(Control::Error { message, .. }) => return Err(NetError::Peer(sanitize(&message))),
+        Some(_) => return Err(NetError::Protocol("expected Offer".into())),
+        None => return Err(NetError::PeerClosed),
+    };
+    let manifest = read_manifest(&mut rx, &offer).await?;
     reporter(Event::Offer(offer.clone()));
 
     let ReceiveOptions {
         dest,
         overwrite,
         confirm,
+        rate_limit,
     } = options;
     if let Some(confirm) = confirm {
         let accepted = tokio::task::spawn_blocking(move || confirm(&offer))
@@ -140,7 +169,8 @@ async fn run(
     };
     write_msg(&mut tx, &Control::Accept).await?;
 
-    let outcome = receive_chunks(conn, &mut tx, rx, sink, reporter).await;
+    let limit = RateLimit::new(rate_limit).map(Arc::new);
+    let outcome = receive_chunks(conn, &mut tx, rx, sink, limit, reporter).await;
     match &outcome {
         Ok(_) => {
             write_msg(&mut tx, &Control::Done).await?;
@@ -155,17 +185,11 @@ async fn run(
             let _ = write_msg(&mut tx, &msg).await;
         }
     }
-    outcome
+    outcome.map(Received::Files)
 }
 
-/// Reads the `Offer` and the manifest that follows, checking that they agree.
-async fn read_offer(rx: &mut RecvStream) -> Result<(Offer, Manifest), NetError> {
-    let offer = match read_msg(rx, MAX_CONTROL_FRAME).await? {
-        Some(Control::Offer(offer)) => offer,
-        Some(Control::Error { message, .. }) => return Err(NetError::Peer(sanitize(&message))),
-        Some(_) => return Err(NetError::Protocol("expected Offer".into())),
-        None => return Err(NetError::PeerClosed),
-    };
+/// Reads the manifest that follows `offer`, checking that they agree.
+async fn read_manifest(rx: &mut RecvStream, offer: &Offer) -> Result<Manifest, NetError> {
     let len = usize::try_from(offer.manifest_len)
         .ok()
         .filter(|&len| len <= MAX_MANIFEST_BYTES)
@@ -193,7 +217,7 @@ async fn read_offer(rx: &mut RecvStream) -> Result<(Offer, Manifest), NetError> 
         ));
     }
     let manifest = Manifest::from_bytes(&bytes)?;
-    if manifest.name() != offer.name
+    if manifest.display_name() != offer.name
         || manifest.file_count() != offer.files
         || manifest.total_bytes() != offer.bytes
     {
@@ -201,7 +225,7 @@ async fn read_offer(rx: &mut RecvStream) -> Result<(Offer, Manifest), NetError> 
             "the offer does not match the manifest".into(),
         ));
     }
-    Ok((offer, manifest))
+    Ok(manifest)
 }
 
 /// Requests every missing chunk and feeds arrivals into the sink until done.
@@ -210,6 +234,7 @@ async fn receive_chunks(
     tx: &mut SendStream,
     rx: RecvStream,
     sink: Sink,
+    limit: Option<Arc<RateLimit>>,
     reporter: &Reporter,
 ) -> Result<Summary, NetError> {
     let missing = sink.missing_chunks();
@@ -237,7 +262,12 @@ async fn receive_chunks(
     });
 
     let mut background = JoinSet::new();
-    background.spawn(accept_streams(conn.clone(), chunk_tx, reporter.clone()));
+    background.spawn(accept_streams(
+        conn.clone(),
+        chunk_tx,
+        limit,
+        reporter.clone(),
+    ));
     background.spawn(watch_control(rx));
 
     loop {
@@ -252,6 +282,7 @@ async fn receive_chunks(
 async fn accept_streams(
     conn: Connection,
     chunk_tx: mpsc::Sender<(Hash, Vec<u8>)>,
+    limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     let mut readers = JoinSet::new();
@@ -259,7 +290,12 @@ async fn accept_streams(
         tokio::select! {
             stream = conn.accept_uni() => {
                 let stream = stream.map_err(NetError::connection)?;
-                readers.spawn(read_stream(stream, chunk_tx.clone(), reporter.clone()));
+                readers.spawn(read_stream(
+                    stream,
+                    chunk_tx.clone(),
+                    limit.clone(),
+                    reporter.clone(),
+                ));
             }
             Some(joined) = readers.join_next() => joined.map_err(NetError::join)??,
         }
@@ -269,9 +305,12 @@ async fn accept_streams(
 async fn read_stream(
     mut stream: RecvStream,
     chunk_tx: mpsc::Sender<(Hash, Vec<u8>)>,
+    limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     while let Some(chunk) = EncodedChunk::read(&mut stream).await? {
+        // Reading slower makes QUIC flow control slow the sender down.
+        limit::take(limit.as_deref(), chunk.payload.len()).await;
         let raw_len = u64::from(chunk.raw_len);
         let decoded = tokio::task::spawn_blocking(move || chunk.into_raw())
             .await

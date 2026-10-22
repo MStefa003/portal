@@ -40,6 +40,18 @@ pub enum Control {
         /// Human-readable details (untrusted; sanitize before display).
         message: String,
     },
+    /// Sender → receiver, instead of an `Offer` (protocol 2+): a text
+    /// message of at most [`crate::MAX_TEXT`] bytes. The receiver answers
+    /// `Done` or `Decline`.
+    Text(String),
+}
+
+/// What a device tells the other during pairing ([`crate::TRUST_ALPN`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Device {
+    /// A name for this device, such as its host name (untrusted; sanitize
+    /// and cap at [`crate::MAX_DEVICE_NAME`] before use).
+    pub name: String,
 }
 
 /// Summary of a transfer, sent before the manifest.
@@ -143,11 +155,22 @@ mod tests {
                 code: ErrorCode::Corrupt,
                 message: "bad".into(),
             },
+            Control::Text(
+                "hello
+there"
+                    .into(),
+            ),
         ];
         for msg in msgs {
             let bytes = postcard::to_allocvec(&msg).unwrap();
             assert_eq!(postcard::from_bytes::<Control>(&bytes).unwrap(), msg);
         }
+    }
+
+    #[test]
+    fn largest_text_fits_in_a_frame() {
+        let text = Control::Text("é".repeat(crate::MAX_TEXT / 2));
+        assert!(postcard::to_allocvec(&text).unwrap().len() <= crate::MAX_CONTROL_FRAME);
     }
 
     #[test]

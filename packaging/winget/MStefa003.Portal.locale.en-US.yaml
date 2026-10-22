@@ -1,0 +1,18 @@
+PackageIdentifier: MStefa003.Portal
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: Marios Stefanidis
+PublisherUrl: https://github.com/MStefa003
+PackageName: Portal
+PackageUrl: https://github.com/MStefa003/portal
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/MStefa003/portal/blob/main/LICENSE-MIT
+ShortDescription: "Send files and folders directly between two machines: peer-to-peer, end-to-end encrypted and resumable."
+Tags:
+- file-transfer
+- p2p
+- encryption
+- cli
+ReleaseNotesUrl: https://github.com/MStefa003/portal/releases/tag/v0.2.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

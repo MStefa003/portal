@@ -9,6 +9,10 @@
 //!
 //! Neither source is trusted. What they return is only a place to dial; the
 //! code handshake in [`crate::direct`] decides whether it is the right peer.
+//!
+//! Trusted devices ([`crate::trust`]) are found by node ID instead: through
+//! mDNS with [`announce_device`] / [`find_device`], and across the internet
+//! through iroh's own address lookup.
 //! To keep IP addresses out of a public database, the DHT item names only
 //! the sender's node ID and relay when it has one; the direct path is then
 //! found by hole punching through that relay.
@@ -121,7 +125,7 @@ pub fn announce(
     let nameplate = code.nameplate();
     let mut tasks = JoinSet::new();
     let mdns = if discovery.mdns {
-        match announce_mdns(endpoint, nameplate) {
+        match announce_mdns(endpoint, &mdns_instance(nameplate)) {
             Ok(registered) => Some(registered),
             Err(e) => {
                 tracing::warn!(%e, "could not announce on the local network");
@@ -157,7 +161,7 @@ pub async fn find(
         if !discovery.mdns {
             return std::future::pending().await;
         }
-        match find_mdns(nameplate).await {
+        match find_mdns(&mdns_instance(nameplate), None).await {
             Ok(addr) => addr,
             Err(e) => {
                 tracing::warn!(%e, "could not search the local network");
@@ -188,6 +192,40 @@ pub async fn find(
         .map_err(|_| NetError::SenderNotFound)
 }
 
+/// Sender to a trusted device: announces `endpoint` by its node ID on the
+/// local network, so the device finds it even without internet. Does
+/// nothing if mDNS is off. Dropping the result stops announcing.
+pub fn announce_device(endpoint: &Endpoint, discovery: &Discovery) -> Announcement {
+    let mdns = if discovery.mdns {
+        match announce_mdns(endpoint, &device_instance(endpoint.id())) {
+            Ok(registered) => Some(registered),
+            Err(e) => {
+                tracing::warn!(%e, "could not announce on the local network");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Announcement {
+        _tasks: JoinSet::new(),
+        mdns,
+    }
+}
+
+/// The local-network address of the device `id`, if it is announcing
+/// itself with [`announce_device`]. Waits until found; never returns if
+/// mDNS is off or fails.
+pub async fn find_device(id: EndpointId, discovery: &Discovery) -> EndpointAddr {
+    if discovery.mdns {
+        match find_mdns(&device_instance(id), Some(id)).await {
+            Ok(addr) => return addr,
+            Err(e) => tracing::warn!(%e, "could not search the local network"),
+        }
+    }
+    std::future::pending().await
+}
+
 // --- DHT ---
 
 /// The DHT signing key for `nameplate`. Deliberately public: it lets the
@@ -199,7 +237,7 @@ fn dht_key(nameplate: u32) -> SigningKey {
     ))
 }
 
-fn dht_client(network: &DhtNetwork) -> Result<AsyncDht, NetError> {
+pub(crate) fn dht_client(network: &DhtNetwork) -> Result<AsyncDht, NetError> {
     let mut builder = Dht::builder();
     if let DhtNetwork::Local(bootstrap) = network {
         builder
@@ -313,7 +351,11 @@ fn mdns_instance(nameplate: u32) -> String {
     format!("portal-{nameplate}")
 }
 
-fn announce_mdns(endpoint: &Endpoint, nameplate: u32) -> Result<(ServiceDaemon, String), NetError> {
+fn device_instance(id: EndpointId) -> String {
+    format!("portal-device-{}", id.fmt_short())
+}
+
+fn announce_mdns(endpoint: &Endpoint, instance: &str) -> Result<(ServiceDaemon, String), NetError> {
     let sockets = endpoint.bound_sockets();
     let port_v4 = sockets
         .iter()
@@ -325,16 +367,9 @@ fn announce_mdns(endpoint: &Endpoint, nameplate: u32) -> Result<(ServiceDaemon, 
         txt.push((MDNS_PORT_V6, v6.port().to_string()));
     }
     let host = format!("portal-{}.local.", endpoint.id().fmt_short());
-    let info = ServiceInfo::new(
-        MDNS_SERVICE,
-        &mdns_instance(nameplate),
-        &host,
-        (),
-        port_v4,
-        &txt[..],
-    )
-    .map_err(|e| NetError::Discovery(Box::new(e)))?
-    .enable_addr_auto();
+    let info = ServiceInfo::new(MDNS_SERVICE, instance, &host, (), port_v4, &txt[..])
+        .map_err(|e| NetError::Discovery(Box::new(e)))?
+        .enable_addr_auto();
     let fullname = info.get_fullname().to_owned();
     let daemon = ServiceDaemon::new().map_err(|e| NetError::Discovery(Box::new(e)))?;
     daemon
@@ -343,13 +378,14 @@ fn announce_mdns(endpoint: &Endpoint, nameplate: u32) -> Result<(ServiceDaemon, 
     Ok((daemon, fullname))
 }
 
-/// Browses until a sender with this nameplate resolves.
-async fn find_mdns(nameplate: u32) -> Result<EndpointAddr, NetError> {
+/// Browses until a sender announcing as `instance` resolves, with node ID
+/// `expected` if given.
+async fn find_mdns(instance: &str, expected: Option<EndpointId>) -> Result<EndpointAddr, NetError> {
     let daemon = ServiceDaemon::new().map_err(|e| NetError::Discovery(Box::new(e)))?;
     let events = daemon
         .browse(MDNS_SERVICE)
         .map_err(|e| NetError::Discovery(Box::new(e)))?;
-    let prefix = format!("{}.", mdns_instance(nameplate));
+    let prefix = format!("{instance}.");
     let found = loop {
         let Ok(event) = events.recv_async().await else {
             break Err(NetError::Internal("mDNS browsing stopped".into()));
@@ -366,6 +402,9 @@ async fn find_mdns(nameplate: u32) -> Result<EndpointAddr, NetError> {
         else {
             continue;
         };
+        if expected.is_some_and(|expected| expected != id) {
+            continue;
+        }
         let port_v6 = service
             .get_property_val_str(MDNS_PORT_V6)
             .and_then(|p| p.parse::<u16>().ok());

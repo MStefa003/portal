@@ -192,6 +192,110 @@ pub fn warn(message: impl std::fmt::Display) {
     eprintln!("{} {message}", style("warning:").yellow().bold());
 }
 
+/// A check result line for `portal doctor`: ✓, ! or ✗ and the message.
+pub fn check(level: Level, message: impl std::fmt::Display) {
+    let mark = match level {
+        Level::Ok => style("✓").green().bold(),
+        Level::Warn => style("!").yellow().bold(),
+        Level::Fail => style("✗").red().bold(),
+    };
+    println!("{mark} {message}");
+}
+
+/// How a check went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    Warn,
+    Fail,
+}
+
+/// Keeps a terminal window open until Enter is pressed, for windows that
+/// close as soon as Portal exits (started from the file manager's menu).
+pub fn pause() {
+    if can_ask() {
+        let term = console::Term::stderr();
+        let _ = term.write_str("\nPress Enter to close this window.");
+        let _ = term.read_line();
+    }
+}
+
+/// Makes untrusted text safe to print to a terminal: line breaks and tabs
+/// stay, other control characters (which could drive the terminal) are
+/// shown escaped.
+pub fn terminal_safe(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+/// Parses a speed such as `10MB/s`, `500k`, `2 MiB/s` or `1000000` (bytes
+/// per second). k/M/G are decimal, Ki/Mi/Gi binary; the "B" and "/s" are
+/// optional.
+pub fn parse_rate(text: &str) -> Result<u64, String> {
+    let lower = text.trim().to_ascii_lowercase().replace(' ', "");
+    let unit = lower.strip_suffix("/s").unwrap_or(&lower);
+    let unit = unit.strip_suffix('b').unwrap_or(unit);
+    let split = unit
+        .find(|c: char| c.is_ascii_alphabetic())
+        .unwrap_or(unit.len());
+    let (number, suffix) = unit.split_at(split);
+    let multiplier: f64 = match suffix {
+        "" => 1.0,
+        "k" => 1e3,
+        "m" => 1e6,
+        "g" => 1e9,
+        "ki" => 1024.0,
+        "mi" => 1024.0 * 1024.0,
+        "gi" => 1024.0 * 1024.0 * 1024.0,
+        _ => {
+            return Err(format!(
+                "unknown unit in \"{text}\"; use e.g. 500k or 10MB/s"
+            ));
+        }
+    };
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("\"{text}\" is not a speed; use e.g. 500k or 10MB/s"))?;
+    let bytes = value * multiplier;
+    if !(1000.0..=1e15).contains(&bytes) {
+        return Err("the speed limit must be at least 1 kB/s".into());
+    }
+    Ok(bytes as u64)
+}
+
+/// A speed for display, e.g. "10.00 MB/s".
+pub fn rate(bytes_per_sec: u64) -> String {
+    format!("{}/s", DecimalBytes(bytes_per_sec))
+}
+
+/// This computer's name, to tell paired devices apart.
+pub fn hostname() -> String {
+    let from_env = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok();
+    let name = from_env.or_else(|| {
+        let out = std::process::Command::new("hostname").output().ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    });
+    let name = name.unwrap_or_default();
+    let name = name.trim();
+    let name = name.strip_suffix(".local").unwrap_or(name);
+    if name.is_empty() {
+        "this device".to_owned()
+    } else {
+        name.to_lowercase()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +305,26 @@ mod tests {
         assert_eq!(describe(1284, 2_300_000_000, false), "1,284 files, 2.30 GB");
         assert_eq!(describe(1, 5, false), "1 file, 5 B");
         assert_eq!(describe(1, 5, true), "5 B");
+    }
+
+    #[test]
+    fn parses_speed_limits() {
+        assert_eq!(parse_rate("10MB/s"), Ok(10_000_000));
+        assert_eq!(parse_rate("500k"), Ok(500_000));
+        assert_eq!(parse_rate("1.5 M"), Ok(1_500_000));
+        assert_eq!(parse_rate("2MiB/s"), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_rate("250000"), Ok(250_000));
+        assert_eq!(parse_rate("1g"), Ok(1_000_000_000));
+        assert!(parse_rate("10 apples").is_err());
+        assert!(parse_rate("fast").is_err());
+        assert!(parse_rate("10").is_err(), "below 1 kB/s");
+        assert_eq!(rate(10_000_000), "10.00 MB/s");
+    }
+
+    #[test]
+    fn untrusted_text_cannot_drive_the_terminal() {
+        assert_eq!(terminal_safe("a\tb\nc"), "a\tb\nc");
+        assert_eq!(terminal_safe("\x1b[2Jboom\r"), "\\u{1b}[2Jboom\\r");
     }
 
     #[test]

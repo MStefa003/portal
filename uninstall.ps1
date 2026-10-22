@@ -10,6 +10,11 @@ if ($userPath) {
     [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
 }
 
+# The right-click menu entries added by `portal context-menu`.
+Remove-Item -LiteralPath 'HKCU:\Software\Classes\*\shell\Portal' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKCU:\Software\Classes\Directory\shell\Portal' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Portal.lnk') -Force -ErrorAction SilentlyContinue
+
 # `return`, not `exit`: under `irm | iex`, exit would close the user's window.
 if (Test-Path $dest) {
     try {
@@ -20,3 +25,4 @@ if (Test-Path $dest) {
     }
 }
 Write-Host "Portal has been removed. Open a new terminal window for the change to take effect."
+Write-Host "Your settings and paired devices are kept in $env:APPDATA\portal; delete that folder to remove them too."

@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "portal-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2682,15 +2682,19 @@ dependencies = [
  "portal-net",
  "portal-proto",
  "portal-rendezvous",
+ "reqwest",
+ "rustls",
+ "sha2 0.11.1",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 1.0.10",
 ]
 
 [[package]]
 name = "portal-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2705,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "portal-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "futures-util",
@@ -2726,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "portal-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2743,7 +2747,7 @@ dependencies = [
 
 [[package]]
 name = "portal-rendezvous"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",

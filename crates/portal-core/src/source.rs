@@ -43,12 +43,21 @@ pub struct Source {
 }
 
 impl Source {
-    /// Indexes `manifest`, which must have been scanned from `root`.
-    pub fn new(root: &Path, manifest: &Manifest) -> Self {
+    /// Indexes `manifest`, which must have been scanned from `roots` (see
+    /// [`crate::Scan::roots`]): one path on disk per top-level entry.
+    pub fn new(roots: &[PathBuf], manifest: &Manifest) -> Self {
+        let on_disk: HashMap<&str, &Path> = manifest
+            .roots()
+            .map(|e| e.path.as_str())
+            .zip(roots.iter().map(PathBuf::as_path))
+            .collect();
         let mut files = Vec::new();
         let mut locations = HashMap::new();
         for (_, entry, meta) in manifest.files() {
-            // The first component is `root`'s own name.
+            // The first component is the name of one of the roots.
+            let Some(root) = on_disk.get(entry.path.first_component()) else {
+                continue;
+            };
             let mut path = root.to_path_buf();
             path.extend(entry.path.components().skip(1));
             let file = files.len();

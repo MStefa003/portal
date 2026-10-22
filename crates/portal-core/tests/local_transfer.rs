@@ -32,7 +32,7 @@ fn transfer(src: &Path, dest: &Path, overwrite: OverwritePolicy) -> Result<Summa
     let wire = scan.manifest.to_bytes().unwrap();
     let received = Manifest::from_bytes(&wire).unwrap();
 
-    let source = Source::new(src, &scan.manifest);
+    let source = Source::new(&scan.roots, &scan.manifest);
     let mut sink = Sink::new(dest, received, overwrite)?;
     for hash in sink.missing_chunks() {
         let data = source.read_chunk(&hash).unwrap();
@@ -216,7 +216,7 @@ fn rejects_corrupted_chunks_and_never_finalizes() {
     let dest = tmp.path().join("out");
 
     let scan = scan(&src, &ScanOptions::default()).unwrap();
-    let source = Source::new(&src, &scan.manifest);
+    let source = Source::new(&scan.roots, &scan.manifest);
     let mut sink = Sink::new(&dest, scan.manifest.clone(), OverwritePolicy::Never).unwrap();
     let (_, _, big) = scan
         .manifest
@@ -279,7 +279,7 @@ fn detects_source_changed_after_scan() {
     let src = tmp.path().join("f.txt");
     fs::write(&src, "original content").unwrap();
     let scan = scan(&src, &ScanOptions::default()).unwrap();
-    let source = Source::new(&src, &scan.manifest);
+    let source = Source::new(&scan.roots, &scan.manifest);
     fs::write(&src, "modified content").unwrap();
 
     let hash = scan.manifest.files().next().unwrap().2.chunks[0].hash;
@@ -346,7 +346,7 @@ fn resumes_an_interrupted_transfer() {
     make_project(&src);
     let dest = tmp.path().join("out");
     let scan = scan(&src, &ScanOptions::default()).unwrap();
-    let source = Source::new(&src, &scan.manifest);
+    let source = Source::new(&scan.roots, &scan.manifest);
 
     // First attempt: half the chunks arrive, then the connection drops.
     let mut first = Sink::new(&dest, scan.manifest.clone(), OverwritePolicy::Never).unwrap();
@@ -392,4 +392,33 @@ fn resumes_an_interrupted_transfer() {
     second.finish().unwrap();
     assert_eq!(snapshot(&src), snapshot(&dest.join("proj")));
     assert!(!dest.join(PARTIAL_DIR_NAME).exists());
+}
+
+/// Several files and folders from different places arrive side by side.
+#[test]
+fn several_items_arrive_side_by_side() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("one/photos");
+    fs::create_dir_all(a.join("2026")).unwrap();
+    fs::write(a.join("2026/x.jpg"), random_bytes(1, 300_000)).unwrap();
+    let b = tmp.path().join("two/notes.txt");
+    fs::create_dir_all(b.parent().unwrap()).unwrap();
+    fs::write(&b, "notes").unwrap();
+    let dest = tmp.path().join("out");
+
+    let scan = portal_core::scan_many(&[a.clone(), b.clone()], &ScanOptions::default()).unwrap();
+    let received = Manifest::from_bytes(&scan.manifest.to_bytes().unwrap()).unwrap();
+    let source = Source::new(&scan.roots, &scan.manifest);
+    let mut sink = Sink::new(&dest, received, OverwritePolicy::Never).unwrap();
+    for hash in sink.missing_chunks() {
+        sink.write_chunk(&hash, &source.read_chunk(&hash).unwrap())
+            .unwrap();
+    }
+    let summary = sink.finish().unwrap();
+    assert_eq!(summary.files, 2);
+    assert_eq!(
+        fs::read(dest.join("photos/2026/x.jpg")).unwrap(),
+        fs::read(a.join("2026/x.jpg")).unwrap()
+    );
+    assert_eq!(fs::read_to_string(dest.join("notes.txt")).unwrap(), "notes");
 }

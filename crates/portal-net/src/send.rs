@@ -11,9 +11,12 @@
 //!    │── Done ─────────────────────►│
 //!    │◄──────── close ──────────────│
 //! ```
+//!
+//! A text message (protocol 2+) replaces everything after `Hello` with one
+//! `Text`, answered by `Done` (or `Decline`).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,13 +25,15 @@ use iroh::{Endpoint, EndpointId};
 use portal_core::{Hash, Manifest, Source};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
-    ALPN, Control, EncodedChunk, MANIFEST_PART_SIZE, MAX_CONTROL_FRAME, Offer, sanitize,
+    ALPN, Control, EncodedChunk, ErrorCode, MANIFEST_PART_SIZE, MAX_CONTROL_FRAME, MAX_TEXT, Offer,
+    sanitize,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
 use crate::error::NetError;
 use crate::event::{Event, Reporter};
+use crate::limit::{self, RateLimit};
 use crate::{endpoint, hang_up, hello};
 
 /// Parallel data streams per transfer: enough to keep the pipe full while
@@ -39,41 +44,73 @@ const ACCEPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 type ControlResult = Result<Option<Control>, portal_proto::FrameError>;
 
+/// What to send.
+#[derive(Debug, Clone)]
+pub enum Payload {
+    /// Scanned files and folders.
+    Files {
+        /// The scanned paths on disk ([`portal_core::Scan::roots`]).
+        roots: Vec<PathBuf>,
+        /// Their manifest.
+        manifest: Manifest,
+    },
+    /// A text message of at most [`MAX_TEXT`] bytes.
+    Text(String),
+}
+
+impl From<portal_core::Scan> for Payload {
+    fn from(scan: portal_core::Scan) -> Self {
+        Self::Files {
+            roots: scan.roots,
+            manifest: scan.manifest,
+        }
+    }
+}
+
+/// How to send.
+#[derive(Debug, Clone, Default)]
+pub struct SendOptions {
+    /// At most this many bytes per second on the network; `None` for no limit.
+    pub rate_limit: Option<u64>,
+}
+
 /// Waits for the receiver `peer` (paired through a rendezvous server) to
 /// connect to `endpoint`, then [`send_on`] that connection. Connections from
 /// any other node are refused.
 pub async fn send(
     endpoint: &Endpoint,
     peer: EndpointId,
-    root: &Path,
-    manifest: &Manifest,
+    payload: &Payload,
+    options: &SendOptions,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     let conn = tokio::time::timeout(ACCEPT_TIMEOUT, accept_from(endpoint, peer))
         .await
         .map_err(|_| NetError::Timeout("waiting for the receiver to connect"))??;
-    send_on(&conn, root, manifest, reporter).await
+    send_on(&conn, payload, options, reporter).await
 }
 
-/// Sends `manifest`'s content, read from `root` (the file or folder that was
-/// scanned), to the already-authenticated receiver on `conn`, then hangs up.
+/// Sends `payload` to the already-authenticated receiver on `conn`, then
+/// hangs up.
 pub async fn send_on(
     conn: &Connection,
-    root: &Path,
-    manifest: &Manifest,
+    payload: &Payload,
+    options: &SendOptions,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     reporter(Event::Connected {
         peer: conn.remote_id().fmt_short().to_string(),
         route: endpoint::route(conn),
     });
-    let result = serve(conn, root, manifest, &reporter).await;
+    let result = serve(conn, payload, options, &reporter).await;
     hang_up(conn, &result).await;
     result
 }
 
-/// The first connection from `peer`; others are closed and ignored.
-async fn accept_from(endpoint: &Endpoint, peer: EndpointId) -> Result<Connection, NetError> {
+/// Waits for a connection from `peer` with [`ALPN`] and returns it; any
+/// other connection is closed and ignored. For peers whose identity is
+/// already known: paired by a rendezvous server, or a trusted device.
+pub async fn accept_from(endpoint: &Endpoint, peer: EndpointId) -> Result<Connection, NetError> {
     loop {
         let incoming = endpoint
             .accept()
@@ -92,16 +129,34 @@ async fn accept_from(endpoint: &Endpoint, peer: EndpointId) -> Result<Connection
 
 async fn serve(
     conn: &Connection,
-    root: &Path,
-    manifest: &Manifest,
+    payload: &Payload,
+    options: &SendOptions,
     reporter: &Reporter,
 ) -> Result<(), NetError> {
     let (mut tx, mut rx) = conn.accept_bi().await.map_err(NetError::connection)?;
-    hello(&mut tx, &mut rx).await?;
+    let version = hello(&mut tx, &mut rx).await?;
+    let (roots, manifest) = match payload {
+        Payload::Text(text) => {
+            if text.len() > MAX_TEXT {
+                return Err(NetError::TextTooLong);
+            }
+            needs_version(&mut tx, version, "text messages").await?;
+            write_msg(&mut tx, &Control::Text(text.clone())).await?;
+            reporter(Event::Started {
+                total_bytes: text.len() as u64,
+                skipped_bytes: 0,
+            });
+            return read_reply(&mut rx, Control::Done).await;
+        }
+        Payload::Files { roots, manifest } => (roots, manifest),
+    };
+    if manifest.root_count() > 1 {
+        needs_version(&mut tx, version, "several items at once").await?;
+    }
 
     let manifest_bytes = manifest.to_bytes()?;
     let offer = Offer {
-        name: manifest.name().to_owned(),
+        name: manifest.display_name(),
         files: manifest.file_count(),
         bytes: manifest.total_bytes(),
         manifest_len: manifest_bytes.len() as u64,
@@ -111,15 +166,10 @@ async fn serve(
     for part in manifest_bytes.chunks(MANIFEST_PART_SIZE) {
         write_msg(&mut tx, &Control::ManifestPart(part.to_vec())).await?;
     }
-    match read_msg(&mut rx, MAX_CONTROL_FRAME).await? {
-        Some(Control::Accept) => {}
-        Some(Control::Decline(reason)) => return Err(NetError::Declined(reason)),
-        Some(Control::Error { message, .. }) => return Err(NetError::Peer(sanitize(&message))),
-        Some(_) => return Err(NetError::Protocol("expected Accept or Decline".into())),
-        None => return Err(NetError::PeerClosed),
-    }
+    read_reply(&mut rx, Control::Accept).await?;
 
-    let outcome = stream_chunks(conn, rx, root, manifest, reporter).await;
+    let limit = RateLimit::new(options.rate_limit).map(Arc::new);
+    let outcome = stream_chunks(conn, rx, roots, manifest, limit, reporter).await;
     if let Err(e) = &outcome {
         let (code, message) = e.for_peer();
         let msg = Control::Error {
@@ -132,12 +182,49 @@ async fn serve(
     outcome
 }
 
+/// Fails, telling the receiver why, if the negotiated protocol `version`
+/// cannot carry `what` (protocol 2 features: text, several items).
+async fn needs_version(
+    tx: &mut SendStream,
+    version: u16,
+    what: &'static str,
+) -> Result<(), NetError> {
+    if version >= 2 {
+        return Ok(());
+    }
+    let msg = Control::Error {
+        code: ErrorCode::Protocol,
+        message: format!(
+            "the sender is sending {what}, which needs a newer Portal. Please update Portal here."
+        ),
+    };
+    let _ = write_msg(tx, &msg).await;
+    Err(NetError::PeerTooOld(what))
+}
+
+/// Reads the receiver's answer, which should be `expected` (`Accept` or `Done`).
+async fn read_reply(
+    rx: &mut iroh::endpoint::RecvStream,
+    expected: Control,
+) -> Result<(), NetError> {
+    match read_msg(rx, MAX_CONTROL_FRAME).await? {
+        Some(msg) if msg == expected => Ok(()),
+        Some(Control::Decline(reason)) => Err(NetError::Declined(reason)),
+        Some(Control::Error { message, .. }) => Err(NetError::Peer(sanitize(&message))),
+        Some(_) => Err(NetError::Protocol(format!(
+            "expected {expected:?} or Decline"
+        ))),
+        None => Err(NetError::PeerClosed),
+    }
+}
+
 /// Serves `Want`s until the receiver says `Done`.
 async fn stream_chunks(
     conn: &Connection,
     mut rx: iroh::endpoint::RecvStream,
-    root: &Path,
+    roots: &[PathBuf],
     manifest: &Manifest,
+    limit: Option<Arc<RateLimit>>,
     reporter: &Reporter,
 ) -> Result<(), NetError> {
     // Frame reads are not cancel-safe, so the control stream is read by its
@@ -154,7 +241,7 @@ async fn stream_chunks(
         }
     });
 
-    let source = Arc::new(Source::new(root, manifest));
+    let source = Arc::new(Source::new(roots, manifest));
     let (want_tx, want_rx) = mpsc::unbounded_channel::<Hash>();
     let queue = Arc::new(Mutex::new(want_rx));
     let mut workers = JoinSet::new();
@@ -163,6 +250,7 @@ async fn stream_chunks(
             conn.clone(),
             source.clone(),
             queue.clone(),
+            limit.clone(),
             reporter.clone(),
         ));
     }
@@ -214,6 +302,7 @@ async fn worker(
     conn: Connection,
     source: Arc<Source>,
     queue: Arc<Mutex<mpsc::UnboundedReceiver<Hash>>>,
+    limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     // Opened lazily, so tiny transfers do not open idle streams.
@@ -235,6 +324,7 @@ async fn worker(
             Some(s) => s,
             None => stream.insert(conn.open_uni().await.map_err(NetError::connection)?),
         };
+        limit::take(limit.as_deref(), chunk.payload.len()).await;
         chunk.write(s).await?;
         reporter(Event::Progress {
             bytes: u64::from(chunk.raw_len),

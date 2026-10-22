@@ -9,27 +9,34 @@
 //! - Pairing through a rendezvous server: [`rendezvous`] turns the code into
 //!   the other peer's identity; [`send`] waits for that receiver and serves
 //!   it, [`receive`] connects to the sender.
+//! - Trusted devices, paired once with a code ([`trust`]): the sender waits
+//!   for the device with [`accept_from`], the receiver connects with
+//!   [`trust::dial`]. No code is needed.
 //!
+//! [`doctor`] checks what works on the current network.
 //! Progress is reported through a [`Reporter`] callback so the CLI (and later
 //! the GUI) can render it however it likes.
 #![forbid(unsafe_code)]
 
 pub mod direct;
 pub mod discovery;
+pub mod doctor;
 mod endpoint;
 mod error;
 mod event;
+mod limit;
 mod receive;
 pub mod rendezvous;
 mod send;
+pub mod trust;
 
 pub use discovery::{DhtNetwork, Discovery};
-pub use endpoint::{NetMode, bind, local_addr, route};
+pub use endpoint::{NetMode, bind, bind_as, local_addr, route};
 pub use error::NetError;
 pub use event::{Event, Reporter, Route};
-pub use iroh::{Endpoint, EndpointAddr, EndpointId};
-pub use receive::{Confirm, ReceiveOptions, receive, receive_on};
-pub use send::{send, send_on};
+pub use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+pub use receive::{Confirm, ReceiveOptions, Received, receive, receive_on};
+pub use send::{Payload, SendOptions, accept_from, send, send_on};
 
 use std::time::Duration;
 

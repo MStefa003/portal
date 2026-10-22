@@ -1,9 +1,14 @@
 //! The `portal` command-line tool: a thin layer over the Portal libraries.
 #![forbid(unsafe_code)]
 
+mod clipboard;
 mod config;
+mod doctor;
+mod menu;
 mod ui;
+mod update;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -14,8 +19,11 @@ use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use portal_core::path::PARTIAL_DIR_NAME;
 use portal_core::{OverwritePolicy, ScanOptions, SinkError};
-use portal_net::{Confirm, DhtNetwork, Discovery, NetError, NetMode, ReceiveOptions};
-use portal_proto::{Code, DeclineReason, Offer, PakeError, RendezvousError};
+use portal_net::{
+    Confirm, DhtNetwork, Discovery, EndpointAddr, NetError, NetMode, Payload, ReceiveOptions,
+    Received, SendOptions,
+};
+use portal_proto::{Code, DeclineReason, MAX_TEXT, Offer, PakeError, RendezvousError};
 use tracing_subscriber::EnvFilter;
 
 use crate::ui::{Progress, Role, Stats, describe};
@@ -26,6 +34,8 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// How long a receiver looks for the sender. The sender needs some seconds
 /// to reach a relay and publish to the DHT after showing the code.
 const FIND_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a receiver waits for a trusted device to start sending.
+const DEVICE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// At most this many skipped entries are listed individually.
 const MAX_SKIPPED_SHOWN: usize = 10;
@@ -63,19 +73,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Send a file or folder. Prints what the receiver needs to type.
-    Send {
-        /// File or folder to send.
-        path: PathBuf,
-
-        /// Skip files ignored by .gitignore / .ignore rules.
-        #[arg(long)]
-        respect_gitignore: bool,
-    },
-    /// Receive a file or folder from a sender.
+    /// Send files, folders or text. Prints what the receiver needs to type.
+    Send(SendArgs),
+    /// Receive files, folders or text from a sender.
     Receive {
         /// The code shown by the sender, e.g. 7-cedar-river. Asked for if omitted.
+        #[arg(conflicts_with = "from")]
         code: Option<String>,
+
+        /// Receive from this paired device instead, without a code (see
+        /// `portal pair`). It runs `portal send ... --to <this device>`.
+        #[arg(long, value_name = "DEVICE")]
+        from: Option<String>,
 
         /// Folder to save into (defaults to the one set with `portal dir`, or
         /// the current directory).
@@ -89,6 +98,53 @@ enum Command {
         /// Accept the transfer without asking first.
         #[arg(short, long)]
         yes: bool,
+
+        /// If a text message arrives, copy it to the clipboard instead of
+        /// printing it.
+        #[arg(long)]
+        copy: bool,
+
+        /// Receive at most this fast, e.g. 500k or 10MB/s.
+        #[arg(long, value_name = "SPEED", value_parser = ui::parse_rate)]
+        limit: Option<u64>,
+    },
+    /// Pair with another device once, so you can send between the two later
+    /// without a code. Run it without a code on one device, and with the
+    /// code it shows on the other.
+    Pair {
+        /// The code shown by `portal pair` on the other device.
+        code: Option<String>,
+
+        /// The name the other device will know this one by (default: this
+        /// computer's name).
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List paired devices.
+    Devices,
+    /// Forget a paired device.
+    Unpair {
+        /// Its name, as `portal devices` shows it.
+        device: String,
+    },
+    /// Check what works on this network and what that means for transfers.
+    Doctor,
+    /// Update Portal to the newest version.
+    Update {
+        /// Only check whether a newer version exists.
+        #[arg(long)]
+        check: bool,
+
+        /// Reinstall the newest version even if it is already installed.
+        #[arg(long, conflicts_with = "check")]
+        force: bool,
+    },
+    /// Add "Send with Portal" to the right-click menu of Explorer, Finder or
+    /// the Linux file manager.
+    ContextMenu {
+        /// Remove it again.
+        #[arg(long)]
+        remove: bool,
     },
     /// Show or set the folder received files are saved into.
     Dir {
@@ -112,8 +168,41 @@ enum Command {
     },
 }
 
+/// `portal send` options.
+#[derive(Debug, clap::Args)]
+struct SendArgs {
+    /// Files and folders to send; several are sent together.
+    #[arg(required_unless_present_any = ["text", "clipboard"], conflicts_with_all = ["text", "clipboard"])]
+    paths: Vec<PathBuf>,
+
+    /// Send this text instead of files ("-" reads it from standard input).
+    #[arg(long, conflicts_with = "clipboard")]
+    text: Option<String>,
+
+    /// Send the text on the clipboard.
+    #[arg(long)]
+    clipboard: bool,
+
+    /// Send to this paired device, without a code (see `portal pair`).
+    #[arg(long, value_name = "DEVICE")]
+    to: Option<String>,
+
+    /// Send at most this fast, e.g. 500k or 10MB/s.
+    #[arg(long, value_name = "SPEED", value_parser = ui::parse_rate)]
+    limit: Option<u64>,
+
+    /// Skip files ignored by .gitignore / .ignore rules.
+    #[arg(long)]
+    respect_gitignore: bool,
+
+    /// Wait for Enter before exiting (for windows opened from a file manager).
+    #[arg(long, hide = true)]
+    pause: bool,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    update::clean_up();
     let cli = Cli::parse();
     init_logging(cli.verbose);
     let mode = if cli.loopback {
@@ -139,37 +228,54 @@ async fn main() -> ExitCode {
         dht_bootstrap: cli.dht_bootstrap,
     };
 
+    let rendezvous = cli.rendezvous.as_deref();
+    let mut pause = false;
     let result = match cli.command {
-        Command::Send {
-            path,
-            respect_gitignore,
-        } => send(&path, respect_gitignore, cli.rendezvous.as_deref(), &net).await,
+        Command::Send(args) => {
+            pause = args.pause;
+            send(args, rendezvous, &net).await
+        }
         Command::Receive {
             code,
+            from,
             output,
             overwrite,
             yes,
+            copy,
+            limit,
         } => {
             let options = ReceiveFlags {
                 output,
                 overwrite,
                 yes,
+                copy,
+                limit,
             };
-            receive(code, options, cli.rendezvous.as_deref(), &net).await
+            receive(code, from, options, rendezvous, &net).await
         }
+        Command::Pair { code, name } => pair(code, name, rendezvous, &net).await,
+        Command::Devices => devices(),
+        Command::Unpair { device } => unpair(&device),
+        Command::Doctor => doctor::run(rendezvous).await,
+        Command::Update { check, force } => update::run(check, force).await,
+        Command::ContextMenu { remove } => menu::run(remove),
         Command::Dir { path, reset } => dir(path.as_deref(), reset),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "portal", &mut std::io::stdout());
             Ok(())
         }
     };
-    match result {
+    let code = match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{} {e:#}", style("Error:").red().bold());
             ExitCode::FAILURE
         }
+    };
+    if pause {
+        ui::pause();
     }
+    code
 }
 
 /// Network settings shared by both commands.
@@ -180,15 +286,61 @@ struct Net {
     dht_bootstrap: Vec<String>,
 }
 
-async fn send(
-    path: &Path,
-    respect_gitignore: bool,
-    rendezvous: Option<&str>,
-    net: &Net,
-) -> anyhow::Result<()> {
-    let options = ScanOptions { respect_gitignore };
-    let to_scan = path.to_path_buf();
-    let scan = tokio::task::spawn_blocking(move || portal_core::scan(&to_scan, &options))
+/// The command-line flags that make the receiver find this sender.
+fn receiver_flags(net: &Net) -> String {
+    let mut flags = String::new();
+    if net.mode == NetMode::Loopback {
+        flags.push_str(" --loopback");
+    }
+    for node in &net.dht_bootstrap {
+        flags.push_str(&format!(" --dht-bootstrap {node}"));
+    }
+    flags
+}
+
+/// What `portal send` sends, and how to describe it once it arrived.
+async fn payload(args: &SendArgs) -> anyhow::Result<(Payload, String)> {
+    let text = if let Some(text) = &args.text {
+        Some(if text == "-" {
+            let mut text = String::new();
+            std::io::stdin()
+                .read_to_string(&mut text)
+                .context("could not read the text from standard input")?;
+            text
+        } else {
+            text.clone()
+        })
+    } else if args.clipboard {
+        Some(clipboard::get()?)
+    } else {
+        None
+    };
+    if let Some(text) = text {
+        if text.trim().is_empty() {
+            bail!("there is no text to send");
+        }
+        if text.len() > MAX_TEXT {
+            bail!(
+                "the text is too long ({} kB; at most {} kB). Save it to a file and send that instead.",
+                text.len() / 1000,
+                MAX_TEXT / 1000
+            );
+        }
+        let chars = text.chars().count();
+        let noun = if chars == 1 {
+            "character"
+        } else {
+            "characters"
+        };
+        println!("Sending a text message ({chars} {noun})");
+        return Ok((Payload::Text(text), "the text".to_owned()));
+    }
+
+    let options = ScanOptions {
+        respect_gitignore: args.respect_gitignore,
+    };
+    let paths = args.paths.clone();
+    let scan = tokio::task::spawn_blocking(move || portal_core::scan_many(&paths, &options))
         .await
         .context("scanning failed")??;
     for skipped in scan.skipped.iter().take(MAX_SKIPPED_SHOWN) {
@@ -211,24 +363,60 @@ async fn send(
         manifest.total_bytes(),
         manifest.is_single_file(),
     );
-    println!(
-        "Sending {} ({summary})",
-        style(format!("\"{}\"", manifest.name())).bold()
-    );
+    let name = match manifest.root_count() {
+        1 => style(format!("\"{}\"", manifest.name())).bold().to_string(),
+        n => format!(
+            "{} and {} more",
+            style(format!("\"{}\"", manifest.name())).bold(),
+            n - 1
+        ),
+    };
+    println!("Sending {name} ({summary})");
+    Ok((Payload::from(scan), summary))
+}
+
+async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Result<()> {
+    if args.to.is_some() && rendezvous.is_some() {
+        bail!("--to sends to a paired device directly; it cannot be combined with --rendezvous");
+    }
+    // Check the device name before scanning what may be a large folder.
+    let device = args.to.as_deref().map(config::device).transpose()?;
+    let (payload, summary) = payload(&args).await?;
+    let options = SendOptions {
+        rate_limit: args.limit,
+    };
+    if let Some(limit) = args.limit {
+        println!("Speed limit: {}", ui::rate(limit));
+    }
 
     let mode = net.mode;
-    let endpoint = portal_net::bind(mode, true).await?;
-    let mut flags = String::new();
-    if mode == NetMode::Loopback {
-        flags.push_str(" --loopback");
-    }
-    for node in &net.dht_bootstrap {
-        flags.push_str(&format!(" --dht-bootstrap {node}"));
-    }
+    let key = device.as_ref().map(|_| config::identity()).transpose()?;
+    let endpoint = portal_net::bind_as(mode, true, key).await?;
+    let mut flags = receiver_flags(net);
 
     let progress = Progress::new();
-    let result = match rendezvous {
-        Some(url) => {
+    let result = match (&device, rendezvous) {
+        (Some(device), _) => {
+            let me = config::own_name()?.unwrap_or_else(ui::hostname);
+            println!(
+                "Waiting for {}. On it, run:\n\n  portal receive{flags} --from {}\n",
+                style(&device.name).bold(),
+                quote_arg(&me)
+            );
+            let announcement = portal_net::trust::announce(&endpoint, &net.discovery);
+            async {
+                let conn = tokio::time::timeout(
+                    SEND_TIMEOUT,
+                    portal_net::accept_from(&endpoint, device.id),
+                )
+                .await
+                .map_err(|_| NetError::Timeout("waiting for the device"))??;
+                drop(announcement);
+                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send)).await
+            }
+            .await
+        }
+        (None, Some(url)) => {
             let waiting = portal_net::rendezvous::allocate(url)
                 .await
                 .map_err(|e| explain(e, rendezvous, Role::Send))?;
@@ -239,15 +427,15 @@ async fn send(
                 portal_net::send(
                     &endpoint,
                     peer,
-                    path,
-                    manifest,
+                    &payload,
+                    &options,
                     progress.reporter(Role::Send),
                 )
                 .await
             }
             .await
         }
-        None => {
+        (None, None) => {
             let code = Code::random()?;
             show_code(&code.to_string(), &flags);
             let announcement =
@@ -260,7 +448,7 @@ async fn send(
                 .await
                 .map_err(|_| NetError::Timeout("waiting for the receiver"))??;
                 drop(announcement);
-                portal_net::send_on(&conn, path, manifest, progress.reporter(Role::Send)).await
+                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send)).await
             }
             .await
         }
@@ -268,8 +456,23 @@ async fn send(
     let stats = progress.finish();
     endpoint.close().await;
     result.map_err(|e| explain(e, rendezvous, Role::Send))?;
-    ui::success(format!("Sent {summary}{}", Stats::suffix(stats)));
+    match payload {
+        Payload::Text(_) => ui::success("Sent the text"),
+        Payload::Files { .. } => ui::success(format!("Sent {summary}{}", Stats::suffix(stats))),
+    }
     Ok(())
+}
+
+/// Quotes a device name for the command line if it needs it.
+fn quote_arg(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    {
+        arg.to_owned()
+    } else {
+        format!("\"{arg}\"")
+    }
 }
 
 fn show_code(code: &str, flags: &str) {
@@ -283,10 +486,19 @@ struct ReceiveFlags {
     output: Option<PathBuf>,
     overwrite: bool,
     yes: bool,
+    copy: bool,
+    limit: Option<u64>,
+}
+
+/// Who `portal receive` gets its transfer from.
+enum Sender {
+    Code(Code),
+    Device(config::Device),
 }
 
 async fn receive(
     code: Option<String>,
+    from: Option<String>,
     flags: ReceiveFlags,
     rendezvous: Option<&str>,
     net: &Net,
@@ -295,14 +507,19 @@ async fn receive(
         output,
         overwrite,
         yes,
+        copy,
+        limit,
     } = flags;
-    let typed = match code {
-        Some(code) => code,
-        None => ask_for_code()?,
+    let from = match (from, code) {
+        (Some(_), _) if rendezvous.is_some() => bail!(
+            "--from receives from a paired device directly; it cannot be combined with --rendezvous"
+        ),
+        (Some(name), _) => Sender::Device(config::device(&name)?),
+        // Parse before touching the network: a typo caught here does not
+        // use up the sender's one attempt.
+        (None, Some(code)) => Sender::Code(Code::parse(&code)?),
+        (None, None) => Sender::Code(Code::parse(&ask_for_code()?)?),
     };
-    // Parse before touching the network: a typo caught here does not use up
-    // the sender's one attempt.
-    let code = Code::parse(&typed)?;
     let dest = match output {
         Some(dir) => dir,
         None => match config::download_dir()? {
@@ -319,8 +536,15 @@ async fn receive(
         Some(Arc::new(move |_: &Offer| ui::confirm(&question)))
     };
 
-    let endpoint = portal_net::bind(net.mode, false).await?;
-    println!("Connecting...");
+    let key = match &from {
+        Sender::Device(_) => Some(config::identity()?),
+        Sender::Code(_) => None,
+    };
+    let endpoint = portal_net::bind_as(net.mode, false, key).await?;
+    match &from {
+        Sender::Device(device) => println!("Waiting for {} to send...", style(&device.name).bold()),
+        Sender::Code(_) => println!("Connecting..."),
+    }
     let options = ReceiveOptions {
         dest: dest.clone(),
         overwrite: if overwrite {
@@ -329,20 +553,28 @@ async fn receive(
             OverwritePolicy::Never
         },
         confirm,
+        rate_limit: limit,
     };
     let progress = Progress::new();
+    let reporter = progress.reporter(Role::Receive);
     let result = async {
-        match rendezvous {
-            Some(url) => {
-                let sender = portal_net::rendezvous::join(url, &code, &endpoint).await?;
-                portal_net::receive(&endpoint, sender, options, progress.reporter(Role::Receive))
-                    .await
+        match (&from, rendezvous) {
+            (Sender::Device(device), _) => {
+                let sender = EndpointAddr::from(device.id);
+                let conn =
+                    portal_net::trust::dial(&endpoint, sender, &net.discovery, DEVICE_TIMEOUT)
+                        .await?;
+                portal_net::receive_on(&conn, options, reporter).await
             }
-            None => {
+            (Sender::Code(code), Some(url)) => {
+                let sender = portal_net::rendezvous::join(url, code, &endpoint).await?;
+                portal_net::receive(&endpoint, sender, options, reporter).await
+            }
+            (Sender::Code(code), None) => {
                 let sender =
-                    portal_net::discovery::find(&code, &net.discovery, FIND_TIMEOUT).await?;
-                let conn = portal_net::direct::connect(&endpoint, sender, &code).await?;
-                portal_net::receive_on(&conn, options, progress.reporter(Role::Receive)).await
+                    portal_net::discovery::find(code, &net.discovery, FIND_TIMEOUT).await?;
+                let conn = portal_net::direct::connect(&endpoint, sender, code).await?;
+                portal_net::receive_on(&conn, options, reporter).await
             }
         }
     }
@@ -350,10 +582,20 @@ async fn receive(
     let stats = progress.finish();
     endpoint.close().await;
     let summary = match result {
-        Ok(summary) => summary,
+        Ok(Received::Files(summary)) => summary,
+        Ok(Received::Text(text)) => return show_text(&text, copy),
         Err(NetError::Cancelled) => {
             println!("Declined. Nothing was saved.");
             return Ok(());
+        }
+        Err(NetError::DeviceNotFound) => {
+            let name = match &from {
+                Sender::Device(device) => device.name.as_str(),
+                Sender::Code(_) => "the device",
+            };
+            bail!(
+                "{name} did not start sending. Run `portal send <files> --to <this device>` on {name}, then try again."
+            );
         }
         Err(e) => {
             let e = explain(e, rendezvous, Role::Receive);
@@ -371,6 +613,126 @@ async fn receive(
         describe(summary.files, summary.bytes, false),
         dest.display(),
         Stats::suffix(stats),
+    ));
+    Ok(())
+}
+
+/// Prints a received text message, or copies it to the clipboard.
+fn show_text(text: &str, copy: bool) -> anyhow::Result<()> {
+    if copy {
+        clipboard::set(text)?;
+        let chars = text.chars().count();
+        ui::success(format!(
+            "Received a text message ({chars} characters) and copied it to the clipboard"
+        ));
+        return Ok(());
+    }
+    // A file or pipe gets the exact text; a terminal gets it made harmless.
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        ui::success("Received a text message:\n");
+        println!("{}", ui::terminal_safe(text));
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+/// `portal pair`: shows a code (without `code`) or uses the other device's.
+async fn pair(
+    code: Option<String>,
+    name: Option<String>,
+    rendezvous: Option<&str>,
+    net: &Net,
+) -> anyhow::Result<()> {
+    if rendezvous.is_some() {
+        bail!(
+            "pairing finds the other device without a rendezvous server; run it without --rendezvous"
+        );
+    }
+    let code = code.map(|c| Code::parse(&c)).transpose()?;
+    let my_name =
+        portal_net::trust::clean_name(&name.or(config::own_name()?).unwrap_or_else(ui::hostname));
+    let key = config::identity()?;
+    let endpoint = portal_net::bind_as(net.mode, code.is_none(), Some(key)).await?;
+    let result = match code {
+        None => {
+            let code = Code::random()?;
+            println!("Pairing code: {}", style(code.to_string()).bold().cyan());
+            println!(
+                "\nOn the other device, run:\n\n  portal pair{} {code}\n",
+                receiver_flags(net)
+            );
+            println!("Waiting for the other device...");
+            let announcement =
+                portal_net::discovery::announce(&endpoint, net.mode, &code, &net.discovery);
+            let paired = tokio::time::timeout(
+                SEND_TIMEOUT,
+                portal_net::trust::pair_accept(&endpoint, &code, &my_name),
+            )
+            .await
+            .map_err(|_| NetError::Timeout("waiting for the other device"));
+            drop(announcement);
+            paired.and_then(|r| r)
+        }
+        Some(code) => {
+            println!("Connecting...");
+            async {
+                let peer = portal_net::discovery::find(&code, &net.discovery, FIND_TIMEOUT).await?;
+                portal_net::trust::pair_join(&endpoint, peer, &code, &my_name).await
+            }
+            .await
+        }
+    };
+    endpoint.close().await;
+    let paired = result.map_err(|e| match e {
+        NetError::Pake(PakeError::WrongCode) => anyhow!(
+            "the code was wrong, so the devices were not paired. Run `portal pair` again for a new code."
+        ),
+        NetError::SenderNotFound => anyhow!(
+            "no device found for this code. Check the number at the start, and that `portal pair` is still running on the other device."
+        ),
+        other => anyhow::Error::new(other),
+    })?;
+    config::set_own_name(&my_name)?;
+    let saved = config::add_device(&paired.name, paired.id)?;
+    ui::success(format!(
+        "Paired with {}. This device is \"{my_name}\" to it.",
+        style(&saved).bold()
+    ));
+    println!(
+        "\nSend to it:        portal send <files> --to {}\nReceive from it:   portal receive --from {}",
+        quote_arg(&saved),
+        quote_arg(&saved)
+    );
+    Ok(())
+}
+
+/// `portal devices`: lists paired devices.
+fn devices() -> anyhow::Result<()> {
+    let devices = config::devices()?;
+    if devices.is_empty() {
+        println!("No paired devices. Pair one with `portal pair`.");
+        return Ok(());
+    }
+    if let Some(me) = config::own_name()? {
+        println!("This device: {}\n", style(me).bold());
+    }
+    println!("Paired devices:");
+    for device in devices {
+        println!(
+            "  {:<24} {}",
+            device.name,
+            style(device.id.fmt_short()).dim()
+        );
+    }
+    Ok(())
+}
+
+/// `portal unpair`: forgets a paired device.
+fn unpair(name: &str) -> anyhow::Result<()> {
+    let removed = config::remove_device(name)?;
+    ui::success(format!(
+        "Forgot {removed}. It can no longer send to or receive from this device without a code."
     ));
     Ok(())
 }
@@ -437,7 +799,7 @@ fn explain(e: NetError, rendezvous: Option<&str>, role: Role) -> anyhow::Error {
             anyhow!("the receiver declined the transfer.")
         }
         NetError::Connect(_) => anyhow::Error::new(e).context(
-            "Could not reach the sender. Check that `portal send` is still running and that neither network blocks UDP",
+            "Could not reach the sender. Check that `portal send` is still running and that neither network blocks UDP (`portal doctor` checks this network)",
         ),
         other => other.into(),
     }
