@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packaging/icon/logo-small.png" alt="Portal" width="240">
+</p>
+
 # Portal
 
 Send files and folders directly between two machines: peer-to-peer,

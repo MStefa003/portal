@@ -32,6 +32,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 webpki-roots.workspace = true
 
+# The build script runs on the build machine, so this is the host's cfg.
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
 [dev-dependencies]
 mainline.workspace = true
 portal-rendezvous.workspace = true

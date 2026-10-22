@@ -6,6 +6,13 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-22
+
+### Added
+- The Portal logo: `portal.exe` now has the Portal icon (also shown by its
+  right-click menu entry and "Send to" shortcut) and the name "Portal" in
+  its file properties, and the README shows the logo.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added
