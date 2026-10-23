@@ -27,14 +27,14 @@ jobs:
       matrix:
         target: [manifest, control, chunk, handshake, code, path]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install nightly --profile minimal
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
       # The corpus grows from run to run, so each run starts where the last
       # one stopped.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -47,7 +47,7 @@ jobs:
             -max_total_time=${{ inputs.seconds || 600 }} -rss_limit_mb=4096
       - name: Keep the failing input
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}
