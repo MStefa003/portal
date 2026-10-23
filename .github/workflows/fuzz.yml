@@ -41,7 +41,9 @@ jobs:
           restore-keys: fuzz-corpus-${{ matrix.target }}-
       - name: Fuzz
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
+          # The prebuilt cargo-fuzz is a musl program and would default to
+          # building for musl, where the sanitizer cannot work.
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- \
             -max_total_time=${{ inputs.seconds || 600 }} -rss_limit_mb=4096
       - name: Keep the failing input
         if: failure()
