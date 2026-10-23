@@ -27,6 +27,10 @@ pub enum SourceError {
     },
 }
 
+/// A file kept open between [`Source::read_chunk_with`] calls; one per reader.
+#[derive(Debug, Default)]
+pub struct OpenFile(Option<(usize, File)>);
+
 struct Location {
     file: usize,
     offset: u64,
@@ -75,9 +79,30 @@ impl Source {
         Self { files, locations }
     }
 
+    /// Number of files, for numbering them with [`Source::file_of`].
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// The number (below [`Source::file_count`]) of the file a chunk is read from.
+    pub fn file_of(&self, hash: &Hash) -> Option<usize> {
+        self.locations.get(hash).map(|loc| loc.file)
+    }
+
     /// Reads one chunk and re-checks its hash, so a file that was modified
     /// after scanning is reported instead of sending wrong data.
     pub fn read_chunk(&self, hash: &Hash) -> Result<Vec<u8>, SourceError> {
+        self.read_chunk_with(hash, &mut OpenFile::default())
+    }
+
+    /// Like [`Source::read_chunk`], keeping the file open in `open` for the
+    /// next chunk: chunks are mostly requested in file order, and opening a
+    /// file per chunk is slow (on Windows especially).
+    pub fn read_chunk_with(
+        &self,
+        hash: &Hash,
+        open: &mut OpenFile,
+    ) -> Result<Vec<u8>, SourceError> {
         let loc = self
             .locations
             .get(hash)
@@ -87,7 +112,11 @@ impl Source {
             path: path.clone(),
             source,
         };
-        let mut file = File::open(path).map_err(io_err)?;
+        let file = match open.0.take() {
+            Some((index, file)) if index == loc.file => file,
+            _ => File::open(path).map_err(io_err)?,
+        };
+        let file = &mut open.0.insert((loc.file, file)).1;
         file.seek(SeekFrom::Start(loc.offset)).map_err(io_err)?;
         let mut buf = vec![0; loc.len as usize];
         match file.read_exact(&mut buf) {

@@ -8,7 +8,11 @@
 `.github/workflows/release.yml` then:
 
 - builds Windows, macOS and Linux archives (x86_64 and ARM64) with SHA-256
-  files, and publishes them as a GitHub Release;
+  files;
+- signs every archive with the release key (`.minisig` files) and checks
+  the signatures against the key built into `portal update`; without the
+  `PORTAL_SIGNING_KEY` secret nothing is published;
+- publishes them as a GitHub Release;
 - attaches a [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
   to every archive, so anyone can check it was built by this workflow from
   the tag: `gh attestation verify <archive> --repo MStefa003/portal`;
@@ -17,6 +21,25 @@
   them to `main`. If `main` is protected, allow `github-actions[bot]` to push
   or the commit step fails (the release itself is already published then);
 - signs and submits to winget when the secrets below are set.
+
+## Release signing key (required)
+
+`portal update` installs only archives signed with Portal's release key, and
+refuses everything else. The public key is `RELEASE_KEY` in
+`crates/portal-cli/src/update.rs` (also in `install.sh` and `SECURITY.md`);
+the secret key is the repository secret `PORTAL_SIGNING_KEY`. Signatures
+are in [minisign](https://jedisct1.github.io/minisign/) format, made by
+`packaging/sign.py`, and name the file in their trusted comment so an
+archive cannot be passed off as another version or platform.
+
+Keep an offline backup of the secret key. If it is lost, releases can no
+longer be signed for existing installations: a new key needs a release that
+ships the new public key, and people on older versions must then update by
+reinstalling. If it leaks, rotate it the same way and say so in the release
+notes.
+
+To make a new key pair: `python3 packaging/sign.py keygen`, then put the
+secret in `PORTAL_SIGNING_KEY` and the public key in the three files above.
 
 ## Package managers
 

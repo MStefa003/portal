@@ -167,7 +167,8 @@ macOS and Linux:
 curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/install.sh | sh
 ```
 
-Both scripts check the download's SHA-256 before installing. The Windows
+Both scripts check the download's SHA-256 before installing (`install.sh`
+also checks the release signature when `minisign` is installed). The Windows
 one also adds "Send with Portal" to the right-click menu (set
 `PORTAL_NO_CONTEXT_MENU=1` first to skip that).
 
@@ -180,9 +181,12 @@ cargo binstall --git https://github.com/MStefa003/portal portal-cli             
 ```
 
 Or download an archive from the [Releases](https://github.com/MStefa003/portal/releases)
-page. Every archive has a SHA-256 file and a build provenance attestation:
-`gh attestation verify <archive> --repo MStefa003/portal` proves it was built
-by this repository's release workflow.
+page. Every archive is signed with Portal's release key (`portal update`
+checks this before installing anything), has a SHA-256 file, and has a build
+provenance attestation: `gh attestation verify <archive> --repo MStefa003/portal`
+proves it was built by this repository's release workflow. See
+[SECURITY.md](SECURITY.md) for how to check the signature yourself and how
+to report a vulnerability.
 
 ## Uninstalling
 

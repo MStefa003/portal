@@ -1,10 +1,12 @@
 # Portal wire protocol
 
-Current protocol version: **2** (`portal_proto::PROTOCOL_VERSION`); the
+Current protocol version: **3** (`portal_proto::PROTOCOL_VERSION`); the
 oldest one still spoken is 1 (`MIN_PROTOCOL_VERSION`). Version 2 adds text
 messages and manifests with several top-level items; a sender only uses
-them when the negotiated version is 2 and otherwise tells the receiver to
-update (see [Peer protocol](#peer-protocol-version-2)).
+them when the negotiated version is at least 2 and otherwise tells the
+receiver to update. Version 3 adds the `NoSpace` decline reason; with older
+senders a receiver declines with `Destination` instead (see
+[Peer protocol](#peer-protocol-version-3)).
 
 > Status: draft. All three layers are specified below. Until the first
 > release the protocol may change without notice.
@@ -287,7 +289,7 @@ must differ, ignoring case. A manifest with a single root keeps version 1,
 so older receivers can still read it. The `Offer.name` of a version 2
 manifest is "*first name* and *n* more".
 
-## Peer protocol (version 2)
+## Peer protocol (version 3)
 
 One QUIC connection over iroh, ALPN `portal/1`. The receiver dials the
 sender. iroh authenticates both ends by their node keys (TLS with raw
@@ -311,7 +313,7 @@ public keys), so the receiver knows it reached the node ID it dialed.
 | 1 | `Offer { name, files, bytes, manifest_len, transfer_id }` | S→R | what is coming |
 | 2 | `ManifestPart(bytes)` | S→R | next piece of the manifest (512 KiB pieces) |
 | 3 | `Accept` | R→S | go ahead |
-| 4 | `Decline(reason)` | R→S | refused: `Rejected`, `Conflicts`, `Destination` |
+| 4 | `Decline(reason)` | R→S | refused: `Rejected`, `Conflicts`, `Destination`, `NoSpace` (version 3: the disk cannot hold what is still missing) |
 | 5 | `Want([hash])` | R→S | send these chunks (up to 8,192 per message) |
 | 6 | `WantDone` | R→S | no more `Want`s |
 | 7 | `Done` | R→S | everything received and verified |

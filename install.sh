@@ -42,6 +42,18 @@ if [ "$expected" != "$actual" ]; then
   echo "Checksum mismatch." >&2
   exit 1
 fi
+# With minisign installed, also check that Portal's release key signed it
+# (`portal update` always does).
+release_key=RWTIdVXMW8Z0RQixMzNSOsaChfzseZPChiIB/jxRwiB7PD9hBKs33lhi
+if command -v minisign >/dev/null; then
+  curl -fsSL "$url.minisig" -o "$file.minisig"
+  if ! minisign -Vm "$file" -x "$file.minisig" -P "$release_key" |
+    grep -qx "Trusted comment: file:portal-$tag-$target.tar.gz"; then
+    echo "The download is not signed by Portal's release key." >&2
+    exit 1
+  fi
+  echo "Signature verified."
+fi
 
 tar xzf "$file" -C "$tmp"
 mkdir -p "$dest"

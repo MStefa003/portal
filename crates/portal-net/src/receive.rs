@@ -8,7 +8,7 @@ use std::time::Duration;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr};
 use portal_core::manifest::MAX_MANIFEST_BYTES;
-use portal_core::{Hash, Manifest, OverwritePolicy, Sink, SinkError, Summary};
+use portal_core::{Hash, Manifest, OverwritePolicy, Sink, SinkError, Summary, VerifiedChunk};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
     ALPN, Control, DeclineReason, EncodedChunk, MAX_CONTROL_FRAME, MAX_TEXT, Offer, WANT_BATCH,
@@ -116,7 +116,7 @@ async fn run(
     reporter: &Reporter,
 ) -> Result<Received, NetError> {
     let (mut tx, mut rx) = conn.open_bi().await.map_err(NetError::connection)?;
-    hello(&mut tx, &mut rx).await?;
+    let version = hello(&mut tx, &mut rx).await?;
     let offer = match read_msg(&mut rx, MAX_CONTROL_FRAME).await? {
         Some(Control::Offer(offer)) => offer,
         Some(Control::Text(text)) => {
@@ -160,6 +160,7 @@ async fn run(
                 SinkError::Conflicts(_) | SinkError::TypeConflict(_) | SinkError::Symlink(_) => {
                     DeclineReason::Conflicts
                 }
+                SinkError::NoSpace { .. } if version >= 3 => DeclineReason::NoSpace,
                 _ => DeclineReason::Destination,
             };
             let _ = write_msg(&mut tx, &Control::Decline(reason)).await;
@@ -249,12 +250,13 @@ async fn receive_chunks(
     write_msg(tx, &Control::WantDone).await?;
 
     // All disk writes happen on one blocking thread that owns the sink.
-    let (chunk_tx, mut chunk_rx) = mpsc::channel::<(Hash, Vec<u8>)>(WRITE_QUEUE);
+    // Chunks are decoded and verified on many threads before they get here.
+    let (chunk_tx, mut chunk_rx) = mpsc::channel::<VerifiedChunk>(WRITE_QUEUE);
     let mut writer = tokio::task::spawn_blocking(move || {
         let mut sink = sink;
         while !sink.is_complete() {
             match chunk_rx.blocking_recv() {
-                Some((hash, data)) => sink.write_chunk(&hash, &data)?,
+                Some(chunk) => sink.write_verified(&chunk)?,
                 None => break,
             }
         }
@@ -272,8 +274,11 @@ async fn receive_chunks(
 
     loop {
         tokio::select! {
-            written = &mut writer => return Ok(written.map_err(NetError::join)??),
+            // A failed stream (e.g. a corrupt chunk) also stops the writer,
+            // which then reports "incomplete"; the stream's error is the real one.
+            biased;
             Some(joined) = background.join_next() => joined.map_err(NetError::join)??,
+            written = &mut writer => return Ok(written.map_err(NetError::join)??),
         }
     }
 }
@@ -281,7 +286,7 @@ async fn receive_chunks(
 /// Accepts data streams and decodes their chunks into the write queue.
 async fn accept_streams(
     conn: Connection,
-    chunk_tx: mpsc::Sender<(Hash, Vec<u8>)>,
+    chunk_tx: mpsc::Sender<VerifiedChunk>,
     limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
@@ -304,7 +309,7 @@ async fn accept_streams(
 
 async fn read_stream(
     mut stream: RecvStream,
-    chunk_tx: mpsc::Sender<(Hash, Vec<u8>)>,
+    chunk_tx: mpsc::Sender<VerifiedChunk>,
     limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
@@ -312,9 +317,12 @@ async fn read_stream(
         // Reading slower makes QUIC flow control slow the sender down.
         limit::take(limit.as_deref(), chunk.payload.len()).await;
         let raw_len = u64::from(chunk.raw_len);
-        let decoded = tokio::task::spawn_blocking(move || chunk.into_raw())
-            .await
-            .map_err(NetError::join)??;
+        let decoded = tokio::task::spawn_blocking(move || {
+            let (hash, raw) = chunk.into_raw()?;
+            Ok::<_, NetError>(VerifiedChunk::new(hash, raw)?)
+        })
+        .await
+        .map_err(NetError::join)??;
         if chunk_tx.send(decoded).await.is_err() {
             break; // The writer stopped; its result explains why.
         }

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use iroh::endpoint::{Connection, presets};
+use iroh::endpoint::{Connection, QuicTransportConfig, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
 use portal_proto::{ALPN, PAIR_ALPN, TRUST_ALPN};
 
@@ -11,6 +11,13 @@ use crate::event::Route;
 
 /// How long a sender waits to reach a relay before sharing direct addresses only.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bytes one stream may have in flight. QUIC's default (1.25 MB) is sized for
+/// 100 Mbit/s at 100 ms and caps faster or longer links; this fills about a
+/// gigabit at 100 ms with the 4 data streams of a transfer.
+const STREAM_WINDOW: u32 = 8 * 1024 * 1024;
+/// Bytes all streams of a connection may have in flight together; also
+/// bounds the memory a peer can make us buffer.
+const CONNECTION_WINDOW: u32 = 4 * STREAM_WINDOW;
 
 /// Which networks an endpoint uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +62,12 @@ pub async fn bind_as(
         Some(key) => builder.secret_key(key),
         None => builder,
     };
+    let transport = QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(STREAM_WINDOW))
+        .receive_window(VarInt::from_u32(CONNECTION_WINDOW))
+        .send_window(u64::from(CONNECTION_WINDOW))
+        .build();
+    let builder = builder.transport_config(transport);
     builder.alpns(alpns).bind().await.map_err(NetError::bind)
 }
 

@@ -41,7 +41,8 @@ pub use version::{VersionError, negotiate};
 ///
 /// - 1: one file or folder per transfer.
 /// - 2: adds [`Control::Text`] and manifests with several top-level items.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// - 3: adds [`DeclineReason::NoSpace`].
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Oldest protocol version this build can still talk to.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;

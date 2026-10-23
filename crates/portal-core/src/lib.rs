@@ -25,5 +25,5 @@ pub use hash::Hash;
 pub use manifest::Manifest;
 pub use path::SafeRelPath;
 pub use scan::{Scan, ScanOptions, scan, scan_many};
-pub use sink::{OverwritePolicy, Sink, SinkError, Summary};
-pub use source::{Source, SourceError};
+pub use sink::{OverwritePolicy, Sink, SinkError, Summary, VerifiedChunk};
+pub use source::{OpenFile, Source, SourceError};

@@ -412,15 +412,20 @@ fn data_home() -> anyhow::Result<PathBuf> {
     }
 }
 
-/// Files this creates: a launcher that opens a terminal, and the entries
-/// for Nautilus and Dolphin that call it.
+/// The Portal logo for the menu entries, in the icon theme as `portal-send`.
 #[cfg(not(any(windows, target_os = "macos")))]
-fn linux_files() -> anyhow::Result<[PathBuf; 3]> {
+const ICON: &[u8] = include_bytes!("../../../packaging/icon/app-256.png");
+
+/// Files this creates: a launcher that opens a terminal, the entries for
+/// Nautilus and Dolphin that call it, and their icon.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn linux_files() -> anyhow::Result<[PathBuf; 4]> {
     let data = data_home()?;
     Ok([
         data.join("portal/send-in-terminal"),
         data.join(format!("nautilus/scripts/{LABEL}")),
         data.join("kio/servicemenus/portal-send.desktop"),
+        data.join("icons/hicolor/256x256/apps/portal-send.png"),
     ])
 }
 
@@ -428,7 +433,7 @@ fn linux_files() -> anyhow::Result<[PathBuf; 3]> {
 fn install(exe: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let [launcher, nautilus, dolphin] = linux_files()?;
+    let [launcher, nautilus, dolphin, icon] = linux_files()?;
     let portal = shell_quote(&exe.display().to_string());
     write_file(
         &launcher,
@@ -460,7 +465,7 @@ exit 1
     write_file(
         &dolphin,
         &format!(
-            "[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\nMimeType=all/all;\nActions=send\n\n[Desktop Action send]\nName={LABEL}\nIcon=document-send\nExec={} %F\n",
+            "[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\nMimeType=all/all;\nActions=send\n\n[Desktop Action send]\nName={LABEL}\nIcon=portal-send\nExec={} %F\n",
             launcher.display()
         ),
     )?;
@@ -468,6 +473,11 @@ exit 1
         fs::set_permissions(file, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("could not make {} executable", file.display()))?;
     }
+    if let Some(parent) = icon.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    fs::write(&icon, ICON).with_context(|| format!("could not write {}", icon.display()))?;
     Ok(())
 }
 

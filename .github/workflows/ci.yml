@@ -5,10 +5,21 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token: CI never needs to write to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes older runs pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The pinned toolchain in rust-toolchain.toml, which is also the minimum
+  # supported Rust version (`rust-version` in Cargo.toml).
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -24,3 +35,37 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # The newest stable Rust, which is what people building from source get.
+  # Catches breakage from new compiler versions early.
+  stable:
+    name: latest stable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +stable test --workspace --locked
+
+  # Known vulnerabilities (RustSec), licenses and where crates come from.
+  # See deny.toml.
+  dependencies:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  # Every fuzz target must still build; fuzz.yml runs them.
+  fuzz-build:
+    name: fuzz targets build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: cargo +nightly fuzz build

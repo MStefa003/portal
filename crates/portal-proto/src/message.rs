@@ -78,6 +78,9 @@ pub enum DeclineReason {
     Conflicts,
     /// The destination cannot be written to.
     Destination,
+    /// The destination's disk is too full (protocol 3+; older peers are
+    /// sent `Destination`).
+    NoSpace,
 }
 
 impl fmt::Display for DeclineReason {
@@ -86,6 +89,7 @@ impl fmt::Display for DeclineReason {
             Self::Rejected => "the receiver said no",
             Self::Conflicts => "files with the same names already exist on the receiver",
             Self::Destination => "the receiver cannot write to its destination folder",
+            Self::NoSpace => "the receiver does not have enough free disk space",
         })
     }
 }

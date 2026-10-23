@@ -75,6 +75,14 @@ pub enum SinkError {
     /// A fully assembled file does not match its hash.
     #[error("`{0}` is corrupted: its content does not match the sender's")]
     CorruptFile(SafeRelPath),
+    /// The destination's disk does not have room for the transfer.
+    #[error("not enough free space: the transfer needs {}, but only {} is free", human_bytes(*.needed), human_bytes(*.available))]
+    NoSpace {
+        /// Bytes the transfer still has to write.
+        needed: u64,
+        /// Bytes free on the destination's disk.
+        available: u64,
+    },
     /// `finish` was called before all chunks arrived.
     #[error("the transfer is incomplete: {missing_chunks} chunks are missing")]
     Incomplete {
@@ -113,6 +121,48 @@ struct Wanted {
 struct FileProgress {
     missing_slots: usize,
     created: bool,
+}
+
+/// A chunk whose content matches its hash. Hashing is the expensive part of
+/// writing a chunk, so receivers verify on many threads and leave only the
+/// disk writes to the [`Sink`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChunk {
+    hash: Hash,
+    data: Vec<u8>,
+}
+
+impl VerifiedChunk {
+    /// Checks `data` against `hash` and the chunk size limit.
+    pub fn new(hash: Hash, data: Vec<u8>) -> Result<Self, SinkError> {
+        verify_chunk(&hash, &data)?;
+        Ok(Self { hash, data })
+    }
+
+    /// The chunk's hash.
+    pub fn hash(&self) -> &Hash {
+        &self.hash
+    }
+
+    /// The chunk's length in bytes.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Whether the chunk is empty (never true for chunks of a manifest).
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+fn verify_chunk(hash: &Hash, data: &[u8]) -> Result<(), SinkError> {
+    if data.len() > MAX_CHUNK_SIZE as usize {
+        return Err(SinkError::ChunkTooLarge(data.len()));
+    }
+    if Hash::of(data) != *hash {
+        return Err(SinkError::CorruptChunk(*hash));
+    }
+    Ok(())
 }
 
 /// Receives chunks for one manifest and assembles them under a destination folder.
@@ -169,6 +219,7 @@ impl Sink {
 
         let id = manifest.transfer_id()?;
         let partial_dir = dest.join(PARTIAL_DIR_NAME).join(id.to_hex_prefix(16));
+        check_space(dest, space_needed(&manifest, &present, &partial_dir))?;
         fs::create_dir_all(&partial_dir).map_err(io_err(&partial_dir))?;
 
         let mut order = Vec::new();
@@ -286,12 +337,17 @@ impl Sink {
     ///
     /// Files whose last chunk this was are verified and moved into place.
     pub fn write_chunk(&mut self, hash: &Hash, data: &[u8]) -> Result<(), SinkError> {
-        if data.len() > MAX_CHUNK_SIZE as usize {
-            return Err(SinkError::ChunkTooLarge(data.len()));
-        }
-        if Hash::of(data) != *hash {
-            return Err(SinkError::CorruptChunk(*hash));
-        }
+        verify_chunk(hash, data)?;
+        self.write_checked(hash, data)
+    }
+
+    /// Like [`Sink::write_chunk`] for a chunk that was already verified,
+    /// possibly on another thread.
+    pub fn write_verified(&mut self, chunk: &VerifiedChunk) -> Result<(), SinkError> {
+        self.write_checked(&chunk.hash, &chunk.data)
+    }
+
+    fn write_checked(&mut self, hash: &Hash, data: &[u8]) -> Result<(), SinkError> {
         if !self.wanted.contains_key(hash) {
             return Err(SinkError::UnexpectedChunk(*hash));
         }
@@ -456,6 +512,48 @@ impl Sink {
     }
 }
 
+/// Bytes that receiving `manifest` will still allocate: every file not
+/// already `present`, less what an earlier attempt's partial file holds.
+fn space_needed(manifest: &Manifest, present: &HashSet<usize>, partial_dir: &Path) -> u64 {
+    manifest
+        .files()
+        .filter(|(index, _, _)| !present.contains(index))
+        .map(|(index, _, file)| {
+            let partial = partial_dir.join(format!("{index}.part"));
+            let have = fs::metadata(partial).map_or(0, |m| m.len());
+            file.size.saturating_sub(have)
+        })
+        .sum()
+}
+
+/// Refuses to start a transfer that cannot fit, instead of failing halfway.
+fn check_space(dest: &Path, needed: u64) -> Result<(), SinkError> {
+    if needed == 0 {
+        return Ok(());
+    }
+    match fs4::available_space(dest) {
+        Ok(available) if available < needed => Err(SinkError::NoSpace { needed, available }),
+        // Not knowing is no reason to refuse; a full disk still fails safely.
+        _ => Ok(()),
+    }
+}
+
+/// `1.50 GB`-style sizes for messages.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
 /// Lists files in `dest` that receiving `manifest` would overwrite.
 ///
 /// Errors (instead of listing) for problems overwriting cannot fix: symbolic
@@ -539,4 +637,49 @@ fn set_executable(file: &File, executable: bool) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_executable(_file: &File, _executable: bool) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfers_larger_than_the_free_space_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(check_space(tmp.path(), 0).is_ok());
+        assert!(check_space(tmp.path(), 1).is_ok());
+        let err = check_space(tmp.path(), u64::MAX).unwrap_err();
+        assert!(matches!(
+            err,
+            SinkError::NoSpace {
+                needed: u64::MAX,
+                ..
+            }
+        ));
+        assert!(err.to_string().starts_with("not enough free space"));
+    }
+
+    #[test]
+    fn sizes_read_well() {
+        assert_eq!(human_bytes(0), "0 bytes");
+        assert_eq!(human_bytes(999), "999 bytes");
+        assert_eq!(human_bytes(1_500), "1.50 KB");
+        assert_eq!(human_bytes(2_300_000_000), "2.30 GB");
+    }
+
+    #[test]
+    fn verified_chunks_must_match_their_hash() {
+        let data = b"some chunk".to_vec();
+        let chunk = VerifiedChunk::new(Hash::of(&data), data.clone()).unwrap();
+        assert_eq!(chunk.len(), data.len());
+        assert!(matches!(
+            VerifiedChunk::new(Hash::of(b"other"), data),
+            Err(SinkError::CorruptChunk(_))
+        ));
+        let huge = vec![0u8; MAX_CHUNK_SIZE as usize + 1];
+        assert!(matches!(
+            VerifiedChunk::new(Hash::of(&huge), huge),
+            Err(SinkError::ChunkTooLarge(_))
+        ));
+    }
 }

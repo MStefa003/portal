@@ -78,12 +78,17 @@ impl EncodedChunk {
                 raw_len,
                 payload: compressed,
             },
-            _ => Self {
-                hash,
-                encoding: Encoding::Raw,
-                raw_len,
-                payload: raw,
-            },
+            _ => Self::raw(hash, raw),
+        }
+    }
+
+    /// Sends `raw` as is, without trying to compress it.
+    pub fn raw(hash: Hash, raw: Vec<u8>) -> Self {
+        Self {
+            hash,
+            encoding: Encoding::Raw,
+            raw_len: u32::try_from(raw.len()).unwrap_or(u32::MAX),
+            payload: raw,
         }
     }
 

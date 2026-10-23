@@ -1,0 +1,63 @@
+# Fuzz targets for everything Portal decodes from the network or the user.
+# See fuzz/README.md. Not part of the main workspace: needs nightly and
+# cargo-fuzz.
+[package]
+name = "portal-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+portal-core = { path = "../crates/portal-core" }
+portal-proto = { path = "../crates/portal-proto" }
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+
+# Its own workspace, so the main one stays on stable.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control"
+path = "fuzz_targets/control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk"
+path = "fuzz_targets/chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "code"
+path = "fuzz_targets/code.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "path"
+path = "fuzz_targets/path.rs"
+test = false
+doc = false
+bench = false

@@ -2,8 +2,13 @@
 //!
 //! The newest version is read from where `github.com/<repo>/releases/latest`
 //! redirects (like the install scripts, so no API rate limit applies). The
-//! archive is checked against its published SHA-256 and unpacked with the
-//! `tar` that Windows 10+, macOS and Linux include. The running program is
+//! archive is checked against its published SHA-256, which catches damage,
+//! and against its minisign signature by Portal's release key (built in
+//! below), which catches forgery: whoever could replace an archive on GitHub
+//! could replace its checksum too, but cannot sign. The signature's trusted
+//! comment names the file, so an old or other-platform archive cannot be
+//! passed off as this one. Then it is unpacked with the `tar` that Windows
+//! 10+, macOS and Linux include. The running program is
 //! replaced by renaming: Windows lets a running `.exe` be renamed but not
 //! overwritten, so the old one is left as `portal.exe.old` and removed on
 //! the next run.
@@ -20,6 +25,10 @@ use sha2::{Digest, Sha256};
 use crate::ui;
 
 const REPO: &str = "MStefa003/portal";
+/// The public half of Portal's release signing key (minisign format). The
+/// release workflow signs every archive with the secret half; see
+/// docs/RELEASING.md.
+const RELEASE_KEY: &str = "RWTIdVXMW8Z0RQixMzNSOsaChfzseZPChiIB/jxRwiB7PD9hBKs33lhi";
 const EXE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 /// The programs a release contains; the second is only updated if installed.
 const PROGRAMS: [&str; 2] = ["portal", "portal-rendezvous"];
@@ -177,6 +186,9 @@ pub async fn run(check: bool, force: bool) -> anyhow::Result<()> {
     if !expected.eq_ignore_ascii_case(&actual) {
         bail!("the download is damaged (checksum mismatch). Please try again.");
     }
+    let signature = String::from_utf8(download(&client, &format!("{url}.minisig")).await?)
+        .context("the signature file is not text")?;
+    verify_signature(&archive, &signature, &format!("{name}.{ext}"))?;
 
     let work = dir.join(format!(".portal-update-{}", std::process::id()));
     let result = install(&archive, ext, &work, &name, dir);
@@ -191,6 +203,21 @@ pub async fn run(check: bool, force: bool) -> anyhow::Result<()> {
         "See what changed: {}",
         style(format!("https://github.com/{REPO}/releases/tag/v{latest}")).underlined()
     );
+    Ok(())
+}
+
+/// Checks that `archive`, published as `file_name`, was signed with the
+/// release key.
+fn verify_signature(archive: &[u8], signature: &str, file_name: &str) -> anyhow::Result<()> {
+    const FORGED: &str = "the download is not signed by Portal's release key, so it was not installed.          Please report this at https://github.com/MStefa003/portal/security";
+    let key = minisign_verify::PublicKey::from_base64(RELEASE_KEY)
+        .map_err(|e| anyhow!("the built-in release key is invalid: {e}"))?;
+    let signature = minisign_verify::Signature::decode(signature).map_err(|_| anyhow!(FORGED))?;
+    key.verify(archive, &signature, false)
+        .map_err(|_| anyhow!(FORGED))?;
+    if signature.trusted_comment() != format!("file:{file_name}") {
+        bail!(FORGED);
+    }
     Ok(())
 }
 
@@ -321,6 +348,51 @@ mod tests {
             Version::current().to_string(),
             env!("CARGO_PKG_VERSION").to_owned()
         );
+    }
+
+    /// Made by `packaging/sign.py sign` with the release key.
+    const SIGNED: &[u8] = b"hello archive
+";
+    const SIGNED_NAME: &str = "portal-v9.9.9-x86_64-pc-windows-msvc.zip";
+    const SIGNATURE: &str = "untrusted comment: signature from the Portal release key
+RUTIdVXMW8Z0RYn3JpLenc8ODWeEap3aQWcuAyRESyHCXJcC93PfJpacbX83Ye2X/oWWJMGVyh5e/RKClefzM9aUjZpAw0EStQE=
+trusted comment: file:portal-v9.9.9-x86_64-pc-windows-msvc.zip
+njelq19ZlnoAc+9zLjELVJ7XoYc2fEiB+rEGLvgBk7h+qeX6kvEJSvxwujQP5czwli8bnwLehrrpchYgZzaFBQ==
+";
+
+    #[test]
+    fn only_release_signed_archives_are_accepted() {
+        verify_signature(SIGNED, SIGNATURE, SIGNED_NAME).unwrap();
+        // Changed content.
+        assert!(
+            verify_signature(
+                b"hello archive!
+",
+                SIGNATURE,
+                SIGNED_NAME
+            )
+            .is_err()
+        );
+        // A genuine archive passed off as another version or platform.
+        assert!(
+            verify_signature(
+                SIGNED,
+                SIGNATURE,
+                "portal-v9.9.10-x86_64-pc-windows-msvc.zip"
+            )
+            .is_err()
+        );
+        // A different trusted comment breaks the global signature.
+        let edited = SIGNATURE.replace("v9.9.9", "v9.9.10");
+        assert!(
+            verify_signature(SIGNED, &edited, "portal-v9.9.10-x86_64-pc-windows-msvc.zip").is_err()
+        );
+        assert!(verify_signature(SIGNED, "not a signature", SIGNED_NAME).is_err());
+    }
+
+    #[test]
+    fn install_script_has_the_same_release_key() {
+        assert!(include_str!("../../../install.sh").contains(RELEASE_KEY));
     }
 
     #[test]

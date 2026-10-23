@@ -7,6 +7,8 @@
 //! modified folder transfer only the chunks that actually changed.
 
 use std::io::{self, Read};
+use std::sync::mpsc;
+use std::thread;
 
 use fastcdc::v2020::{self, StreamCDC};
 use serde::{Deserialize, Serialize};
@@ -53,32 +55,70 @@ pub struct ChunkedFile {
 
 /// Reads `reader` to the end, splitting it into content-defined chunks.
 ///
-/// Computes each chunk's hash and the whole-content hash in one pass.
+/// Computes each chunk's hash and the whole-content hash in one pass, the
+/// latter on a second thread for files of more than one chunk.
 pub fn chunk_reader<R: Read>(reader: R) -> io::Result<ChunkedFile> {
-    let cdc = StreamCDC::new(
+    let mut cdc = StreamCDC::new(
         reader,
         MIN_CHUNK_SIZE as usize,
         AVG_CHUNK_SIZE as usize,
         MAX_CHUNK_SIZE as usize,
     );
-    let mut whole = blake3::Hasher::new();
-    let mut chunks = Vec::new();
-    let mut size = 0u64;
-    for chunk in cdc {
-        let chunk = chunk.map_err(io::Error::from)?;
-        let len = u32::try_from(chunk.data.len())
-            .map_err(|_| io::Error::other("chunker produced an oversized chunk"))?;
-        whole.update(&chunk.data);
-        chunks.push(ChunkRef {
-            hash: Hash::of(&chunk.data),
-            len,
+    let Some(first) = cdc.next() else {
+        return Ok(ChunkedFile {
+            size: 0,
+            hash: Hash::of(b""),
+            chunks: Vec::new(),
         });
-        size += u64::from(len);
-    }
-    Ok(ChunkedFile {
-        size,
-        hash: whole.finalize().into(),
-        chunks,
+    };
+    let first = first.map_err(io::Error::from)?.data;
+    let first_ref = chunk_ref(&first)?;
+    let Some(second) = cdc.next() else {
+        // One chunk: its hash is the hash of the whole content.
+        return Ok(ChunkedFile {
+            size: u64::from(first_ref.len),
+            hash: first_ref.hash,
+            chunks: vec![first_ref],
+        });
+    };
+
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(WHOLE_HASH_QUEUE);
+    thread::scope(|scope| {
+        let whole = scope.spawn(move || {
+            let mut hasher = blake3::Hasher::new();
+            for data in rx {
+                hasher.update(&data);
+            }
+            Hash::from(hasher.finalize())
+        });
+        let mut size = u64::from(first_ref.len);
+        let mut chunks = vec![first_ref];
+        // A send fails only if the hashing thread is gone; `join` reports that.
+        let _ = tx.send(first);
+        for chunk in std::iter::once(second).chain(cdc) {
+            let data = chunk.map_err(io::Error::from)?.data;
+            let chunk = chunk_ref(&data)?;
+            size += u64::from(chunk.len);
+            chunks.push(chunk);
+            let _ = tx.send(data);
+        }
+        drop(tx);
+        let hash = whole
+            .join()
+            .map_err(|_| io::Error::other("the hashing thread failed"))?;
+        Ok(ChunkedFile { size, hash, chunks })
+    })
+}
+
+/// Chunks waiting for the whole-content hash (at most 1 MiB each).
+const WHOLE_HASH_QUEUE: usize = 8;
+
+fn chunk_ref(data: &[u8]) -> io::Result<ChunkRef> {
+    let len = u32::try_from(data.len())
+        .map_err(|_| io::Error::other("chunker produced an oversized chunk"))?;
+    Ok(ChunkRef {
+        hash: Hash::of(data),
+        len,
     })
 }
 

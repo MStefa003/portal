@@ -18,15 +18,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use iroh::endpoint::{Connection, SendStream};
 use iroh::{Endpoint, EndpointId};
-use portal_core::{Hash, Manifest, Source};
+use portal_core::{Hash, Manifest, OpenFile, Source, SourceError};
 use portal_proto::frame::{read_msg, write_msg};
 use portal_proto::{
-    ALPN, Control, EncodedChunk, ErrorCode, MANIFEST_PART_SIZE, MAX_CONTROL_FRAME, MAX_TEXT, Offer,
-    sanitize,
+    ALPN, Control, EncodedChunk, Encoding, ErrorCode, MANIFEST_PART_SIZE, MAX_CONTROL_FRAME,
+    MAX_TEXT, Offer, sanitize,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
@@ -241,14 +242,14 @@ async fn stream_chunks(
         }
     });
 
-    let source = Arc::new(Source::new(roots, manifest));
+    let chunks = Arc::new(Chunks::new(Source::new(roots, manifest)));
     let (want_tx, want_rx) = mpsc::unbounded_channel::<Hash>();
     let queue = Arc::new(Mutex::new(want_rx));
     let mut workers = JoinSet::new();
     for _ in 0..DATA_STREAMS {
         workers.spawn(worker(
             conn.clone(),
-            source.clone(),
+            chunks.clone(),
             queue.clone(),
             limit.clone(),
             reporter.clone(),
@@ -297,41 +298,92 @@ async fn stream_chunks(
     }
 }
 
-/// Pulls hashes from the queue and writes the chunks to one data stream.
+/// Pulls hashes from the queue and writes the chunks to one data stream,
+/// reading and compressing the next chunk while the current one is written.
 async fn worker(
     conn: Connection,
-    source: Arc<Source>,
-    queue: Arc<Mutex<mpsc::UnboundedReceiver<Hash>>>,
+    chunks: Arc<Chunks>,
+    queue: Queue,
     limit: Option<Arc<RateLimit>>,
     reporter: Reporter,
 ) -> Result<(), NetError> {
     // Opened lazily, so tiny transfers do not open idle streams.
     let mut stream: Option<SendStream> = None;
-    loop {
-        let next = queue.lock().await.recv().await;
-        let Some(hash) = next else { break };
-
-        let source = source.clone();
-        let chunk = tokio::task::spawn_blocking(move || {
-            source
-                .read_chunk(&hash)
-                .map(|raw| EncodedChunk::compress(hash, raw))
-        })
-        .await
-        .map_err(NetError::join)??;
-
+    let mut next = prepare(&chunks, &queue, OpenFile::default()).await;
+    while let Some(task) = next {
+        let (chunk, open) = task.await.map_err(NetError::join)?;
+        let chunk = chunk?;
         let s = match &mut stream {
             Some(s) => s,
             None => stream.insert(conn.open_uni().await.map_err(NetError::connection)?),
         };
         limit::take(limit.as_deref(), chunk.payload.len()).await;
-        chunk.write(s).await?;
+        let (written, following) = tokio::join!(chunk.write(s), prepare(&chunks, &queue, open));
+        written?;
         reporter(Event::Progress {
             bytes: u64::from(chunk.raw_len),
         });
+        next = following;
     }
     if let Some(mut s) = stream {
         s.finish().map_err(NetError::connection)?;
     }
     Ok(())
+}
+
+/// The chunks still to send, shared by the workers.
+type Queue = Arc<Mutex<mpsc::UnboundedReceiver<Hash>>>;
+/// A chunk being read and compressed, and the file it was read from.
+type Prepared = tokio::task::JoinHandle<(Result<EncodedChunk, SourceError>, OpenFile)>;
+
+/// Takes the next hash from the queue and starts reading and compressing
+/// its chunk on a blocking thread; `None` once the queue is done.
+async fn prepare(chunks: &Arc<Chunks>, queue: &Queue, mut open: OpenFile) -> Option<Prepared> {
+    let hash = queue.lock().await.recv().await?;
+    let chunks = chunks.clone();
+    Some(tokio::task::spawn_blocking(move || {
+        let chunk = chunks
+            .source
+            .read_chunk_with(&hash, &mut open)
+            .map(|raw| chunks.encode(hash, raw));
+        (chunk, open)
+    }))
+}
+
+/// Chunks served from disk, compressed where that pays off.
+struct Chunks {
+    source: Source,
+    /// Files with a chunk that did not get smaller: most likely already
+    /// compressed (video, images, archives), so their other chunks are sent
+    /// as they are instead of spending time on zstd.
+    incompressible: Vec<AtomicBool>,
+}
+
+impl Chunks {
+    fn new(source: Source) -> Self {
+        let incompressible = (0..source.file_count())
+            .map(|_| AtomicBool::new(false))
+            .collect();
+        Self {
+            source,
+            incompressible,
+        }
+    }
+
+    fn encode(&self, hash: Hash, raw: Vec<u8>) -> EncodedChunk {
+        let flag = self
+            .source
+            .file_of(&hash)
+            .and_then(|file| self.incompressible.get(file));
+        if flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
+            return EncodedChunk::raw(hash, raw);
+        }
+        let chunk = EncodedChunk::compress(hash, raw);
+        if chunk.encoding == Encoding::Raw
+            && let Some(flag) = flag
+        {
+            flag.store(true, Ordering::Relaxed);
+        }
+        chunk
+    }
 }

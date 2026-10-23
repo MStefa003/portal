@@ -1,0 +1,19 @@
+# Weekly pull requests for outdated dependencies and GitHub Actions, so
+# security fixes arrive without anyone having to look.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One pull request for all compatible updates instead of dozens.
+      cargo:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

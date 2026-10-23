@@ -1,3 +1,9 @@
 /target
 **/*.rs.bk
 .portal-partial/
+# cargo fuzz (see fuzz/README.md)
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the program icon (app.ico, app.png) and the README logo
+"""Builds the program icon (app.ico, app.png, app-256.png) and the README logo
 (logo-small.png) from the logo (portal.png).
 
     python3 packaging/icon/make_app_icon.py
@@ -50,12 +50,14 @@ def main():
     tile.paste(cropped, ((SIZE - w) // 2, (SIZE - h) // 2))
 
     tile.save(HERE / "app.png")
+    # Built into the Linux binary for its right-click menu entries.
+    tile.resize((256, 256), Image.LANCZOS).save(HERE / "app-256.png", optimize=True)
     tile.save(
         HERE / "app.ico",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
     logo.resize((480, 480), Image.LANCZOS).save(HERE / "logo-small.png", optimize=True)
-    print(f"Wrote app.png, app.ico and logo-small.png (mark at {box})")
+    print(f"Wrote app.png, app-256.png, app.ico and logo-small.png (mark at {box})")
 
 
 if __name__ == "__main__":

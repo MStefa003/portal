@@ -5,12 +5,19 @@ use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 use ignore::WalkBuilder;
 
 use crate::chunk::chunk_reader;
 use crate::manifest::{Entry, EntryKind, FileMeta, Manifest, ManifestError, Timestamp};
 use crate::path::{PARTIAL_DIR_NAME, PathError, SafeRelPath};
+
+/// Files read at the same time while scanning. More stops helping once the
+/// disk, not hashing, is the limit.
+const MAX_SCAN_THREADS: usize = 8;
 
 /// Options for [`scan`].
 #[derive(Debug, Clone, Default)]
@@ -91,18 +98,19 @@ pub fn scan_many(roots: &[PathBuf], options: &ScanOptions) -> Result<Scan, ScanE
     if roots.is_empty() {
         return Err(ScanError::Nothing);
     }
-    let mut entries = Vec::new();
+    let mut planned = Vec::new();
     let mut skipped = Vec::new();
     let mut collision_keys = HashSet::new();
     for root in roots {
         scan_root(
             root,
             options,
-            &mut entries,
+            &mut planned,
             &mut skipped,
             &mut collision_keys,
         )?;
     }
+    let entries = read_files(planned, &mut skipped);
     let manifest = Manifest {
         version: Manifest::version_for(roots.len()),
         entries,
@@ -115,10 +123,22 @@ pub fn scan_many(roots: &[PathBuf], options: &ScanOptions) -> Result<Scan, ScanE
     })
 }
 
+/// An entry found while walking, before the content of its file is read.
+enum Planned {
+    /// Complete already: a folder, or a file given directly.
+    Ready(Entry),
+    /// A file found inside a folder.
+    File {
+        rel: SafeRelPath,
+        path: PathBuf,
+        meta: Metadata,
+    },
+}
+
 fn scan_root(
     root: &Path,
     options: &ScanOptions,
-    entries: &mut Vec<Entry>,
+    entries: &mut Vec<Planned>,
     skipped: &mut Vec<Skipped>,
     collision_keys: &mut HashSet<String>,
 ) -> Result<(), ScanError> {
@@ -144,15 +164,15 @@ fn scan_root(
 
     if meta.is_file() {
         let file = file_meta(root, &meta).map_err(io_err)?;
-        entries.push(Entry {
+        entries.push(Planned::Ready(Entry {
             path: root_path,
             kind: EntryKind::File(file),
-        });
+        }));
     } else if meta.is_dir() {
-        entries.push(Entry {
+        entries.push(Planned::Ready(Entry {
             path: root_path.clone(),
             kind: EntryKind::Dir,
-        });
+        }));
         walk(root, &root_path, options, entries, skipped, collision_keys);
     } else {
         return Err(ScanError::Unsupported(root.to_path_buf()));
@@ -164,7 +184,7 @@ fn walk(
     root: &Path,
     root_path: &SafeRelPath,
     options: &ScanOptions,
-    entries: &mut Vec<Entry>,
+    entries: &mut Vec<Planned>,
     skipped: &mut Vec<Skipped>,
     collision_keys: &mut HashSet<String>,
 ) {
@@ -243,19 +263,16 @@ fn walk(
         }
 
         if file_type.is_dir() {
-            entries.push(Entry {
+            entries.push(Planned::Ready(Entry {
                 path: rel_path,
                 kind: EntryKind::Dir,
-            });
+            }));
         } else if file_type.is_file() {
-            match entry
-                .metadata()
-                .map_err(io::Error::other)
-                .and_then(|meta| file_meta(path, &meta))
-            {
-                Ok(file) => entries.push(Entry {
-                    path: rel_path,
-                    kind: EntryKind::File(file),
+            match entry.metadata() {
+                Ok(meta) => entries.push(Planned::File {
+                    rel: rel_path,
+                    path: path.to_path_buf(),
+                    meta,
                 }),
                 Err(e) => skip(skipped, path, format!("could not read: {e}")),
             }
@@ -263,6 +280,52 @@ fn walk(
             skip(skipped, path, "not a regular file or folder".into());
         }
     }
+}
+
+/// Chunks the planned files on several threads (most of a scan is reading
+/// and hashing) and returns the entries in their original order, leaving out
+/// files that could not be read.
+fn read_files(planned: Vec<Planned>, skipped: &mut Vec<Skipped>) -> Vec<Entry> {
+    let files: Vec<usize> = planned
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| matches!(p, Planned::File { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let results: Vec<OnceLock<io::Result<FileMeta>>> =
+        planned.iter().map(|_| OnceLock::new()).collect();
+    let threads = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_SCAN_THREADS)
+        .min(files.len());
+    let next = AtomicUsize::new(0);
+    thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while let Some(&i) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if let Planned::File { path, meta, .. } = &planned[i] {
+                        let _ = results[i].set(file_meta(path, meta));
+                    }
+                }
+            });
+        }
+    });
+
+    let mut entries = Vec::with_capacity(planned.len());
+    for (planned, result) in planned.into_iter().zip(results) {
+        match planned {
+            Planned::Ready(entry) => entries.push(entry),
+            Planned::File { rel, path, .. } => match result.into_inner() {
+                Some(Ok(file)) => entries.push(Entry {
+                    path: rel,
+                    kind: EntryKind::File(file),
+                }),
+                Some(Err(e)) => skip(skipped, &path, format!("could not read: {e}")),
+                None => skip(skipped, &path, "could not read".into()),
+            },
+        }
+    }
+    entries
 }
 
 fn skip(skipped: &mut Vec<Skipped>, path: &Path, reason: String) {

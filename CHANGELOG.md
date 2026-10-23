@@ -6,6 +6,41 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
+### Added
+- `portal receive` checks for free disk space before accepting a transfer
+  and refuses up front, instead of failing halfway with a full disk. The
+  sender is told why (protocol version 3; older senders hear "cannot write
+  to its destination folder").
+- Release archives are signed with Portal's release key (minisign format,
+  `.minisig` next to each archive). `portal update` installs only correctly
+  signed archives, and `install.sh` checks the signature when `minisign` is
+  installed. See SECURITY.md.
+- SECURITY.md: how to report vulnerabilities, what Portal protects against,
+  and how to verify downloads.
+- Fuzzing for every decoder of untrusted input (manifests, frames, chunks,
+  handshake and rendezvous messages, codes, paths), run nightly in CI.
+- CI also tests the newest stable Rust, audits dependencies with
+  cargo-deny (RustSec advisories, licenses, sources), and Dependabot
+  proposes updates weekly.
+- On Linux, the right-click menu entries show the Portal icon.
+
+### Changed
+- Faster: scanning before the code appears is about 2.5 times faster
+  (several files are read at once, and the whole-file hash runs alongside
+  chunking). Sending reads and compresses the next chunk while the current
+  one is on the network, keeps files open between chunks, and stops
+  compressing files that do not shrink (video, photos, archives). Chunks are
+  verified on all cores instead of the disk-writing thread. Larger QUIC
+  flow-control windows let a single transfer fill fast long-distance links.
+
+### Security
+- tokio 1.54.0 → 1.54.1: the old version was yanked for a use-after-free in
+  its timers (RUSTSEC-2026-0384).
+- ctutils 0.4.3 → 0.4.5: constant-time helpers used by the cryptography
+  could branch on secret values (RUSTSEC-2026-0385).
+
 ## [0.3.1] - 2026-10-22
 
 ### Added

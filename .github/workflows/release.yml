@@ -2,6 +2,10 @@ name: Release
 
 # Push a tag like v0.2.0 to build every platform and publish a GitHub Release.
 #
+# Required: the PORTAL_SIGNING_KEY secret. Every archive is signed with it
+# (minisign format) and `portal update` refuses unsigned ones, so without it
+# nothing is published. See docs/RELEASING.md.
+#
 # Optional, each enabled by adding its secrets (see docs/RELEASING.md):
 # - Windows code signing through SignPath: SIGNPATH_API_TOKEN secret and
 #   SIGNPATH_ORGANIZATION_ID variable.
@@ -139,6 +143,24 @@ jobs:
           path: dist
           pattern: release-*
           merge-multiple: true
+
+      # Sign every archive; `portal update` checks these signatures.
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cryptography==44.0.0
+      - name: Sign the archives
+        env:
+          PORTAL_SIGNING_KEY: ${{ secrets.PORTAL_SIGNING_KEY }}
+        run: |
+          python src/packaging/sign.py sign dist/*.zip dist/*.tar.gz
+          # The key `portal update` has built in must accept them.
+          key=$(grep -oP 'const RELEASE_KEY: &str = "\K[^"]+' src/crates/portal-cli/src/update.rs)
+          python src/packaging/sign.py verify "$key" dist/*.zip dist/*.tar.gz
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/portal-*
