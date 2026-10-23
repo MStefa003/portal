@@ -2,28 +2,28 @@
 class Portal < Formula
   desc "Peer-to-peer, end-to-end encrypted file and folder transfer"
   homepage "https://github.com/MStefa003/portal"
-  version "0.3.1"
+  version "0.4.0"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
-      url "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-aarch64-apple-darwin.tar.gz"
-      sha256 "e4959ee19eb84d7b0fa304d6cc8677cc56856feceef22efea2ad146179d68f8f"
+      url "https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-aarch64-apple-darwin.tar.gz"
+      sha256 "55a243eec4947a51322192d411c19cba3f88d0c64877284ecf00b8c4acbd8725"
     end
     on_intel do
-      url "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-x86_64-apple-darwin.tar.gz"
-      sha256 "03f123f72046ee28004690703879dab945771a9a336bd00eb996f98b9a2212e5"
+      url "https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-x86_64-apple-darwin.tar.gz"
+      sha256 "41b58e4c129b4b2d5890d29b72ec2ecbb8c733be8730fc06e27b5020b55de90e"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "8084de949f856826e3942ad28a02931363b2534cef2a1cc7cdbfe551100755db"
+      url "https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "a5910e94aafe3102ef2c72c12cd555ec3ae818d002d2adbdfbcab7b8679184d5"
     end
     on_intel do
-      url "https://github.com/MStefa003/portal/releases/download/v0.3.1/portal-v0.3.1-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "414cb4ed64254abcd1284e92bfa3b0f4436793ecfef6996c0bc486337e2da00d"
+      url "https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "db466279e0e420f8b897450ca42b523aada3c982fcf20cfddf96e3d6d15a6bf8"
     end
   end
 
