@@ -6,6 +6,30 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-26
+
+### Added
+- Right-click menu on Windows: "Send this folder with Portal" and "Receive
+  with Portal here" on a folder's empty space, and paired devices in the
+  menus ("Send with Portal → To laptop"), updated by `portal pair` and
+  `portal unpair`.
+- Right-click menu on Linux: Nemo (Cinnamon) and Thunar (Xfce) entries. The
+  terminal opened for it can be chosen with `TERMINAL`, and Ptyxis, GNOME
+  Console, kitty, WezTerm and foot are found too.
+
+### Changed
+- From the right-click menu, the code is copied to the clipboard, and the
+  window closes 5 seconds after a successful transfer instead of waiting
+  for Enter (it still waits after an error or a received text message).
+- The right-click menu is repaired the next time Portal runs if Portal was
+  moved, and brought up to date after an update.
+- On Windows, the menu is set up without starting `reg.exe` or PowerShell,
+  which security software or policies sometimes blocked.
+
+### Fixed
+- `portal send "D:\"` and `--output "D:\"` on Windows: the quote after the
+  backslash no longer ends up in the path.
+
 ## [0.5.0] - 2026-10-26
 
 ### Changed

@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "portal-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2707,12 +2707,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 1.0.10",
+ "windows-registry",
  "winresource",
 ]
 
 [[package]]
 name = "portal-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -2728,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "portal-net"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "futures-util",
@@ -2749,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "portal-proto"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -2766,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "portal-rendezvous"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",

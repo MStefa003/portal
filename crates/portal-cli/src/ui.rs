@@ -1,6 +1,7 @@
 //! Terminal output: progress bar, sizes and messages.
 
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -224,14 +225,41 @@ pub enum Level {
     Fail,
 }
 
-/// Keeps a terminal window open until Enter is pressed, for windows that
-/// close as soon as Portal exits (started from the file manager's menu).
-pub fn pause() {
-    if can_ask() {
-        let term = console::Term::stderr();
-        let _ = term.write_str("\nPress Enter to close this window.");
-        let _ = term.read_line();
+/// How long a window from the file manager's menu stays after success.
+const AUTO_CLOSE: Duration = Duration::from_secs(5);
+
+/// Set when something was shown that the user still has to read.
+static KEEP_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// Makes [`pause`] wait for Enter even after success.
+pub fn keep_open() {
+    KEEP_OPEN.store(true, Ordering::Relaxed);
+}
+
+/// Keeps a terminal window open for windows that close as soon as Portal
+/// exits (started from the file manager's menu): after success for a few
+/// seconds, otherwise until Enter is pressed, so errors can be read.
+pub fn pause(success: bool) {
+    if !can_ask() {
+        return;
     }
+    let term = console::Term::stderr();
+    if success && !KEEP_OPEN.load(Ordering::Relaxed) {
+        let _ = term.write_str(&format!(
+            "\nThis window closes in {} seconds (press Enter to close it now).",
+            AUTO_CLOSE.as_secs()
+        ));
+        let (done, enter) = std::sync::mpsc::channel();
+        // Left blocked on the terminal if nobody presses Enter; exiting ends it.
+        std::thread::spawn(move || {
+            let _ = console::Term::stderr().read_line();
+            let _ = done.send(());
+        });
+        let _ = enter.recv_timeout(AUTO_CLOSE);
+        return;
+    }
+    let _ = term.write_str("\nPress Enter to close this window.");
+    let _ = term.read_line();
 }
 
 /// Makes untrusted text safe to print to a terminal: line breaks and tabs

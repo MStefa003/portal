@@ -67,6 +67,11 @@ struct Cli {
     #[arg(long, global = true, hide = true)]
     no_mdns: bool,
 
+    /// Started from the file manager's menu: copy the code, and keep the
+    /// window open until it has been read.
+    #[arg(long, global = true, hide = true)]
+    pause: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -194,10 +199,6 @@ struct SendArgs {
     /// Skip files ignored by .gitignore / .ignore rules.
     #[arg(long)]
     respect_gitignore: bool,
-
-    /// Wait for Enter before exiting (for windows opened from a file manager).
-    #[arg(long, hide = true)]
-    pause: bool,
 }
 
 #[tokio::main]
@@ -228,13 +229,15 @@ async fn main() -> ExitCode {
         dht_bootstrap: cli.dht_bootstrap,
     };
 
+    // Not while changing the menu itself.
+    if !matches!(cli.command, Command::ContextMenu { .. }) {
+        menu::heal();
+    }
+
     let rendezvous = cli.rendezvous.as_deref();
-    let mut pause = false;
+    let pause = cli.pause;
     let result = match cli.command {
-        Command::Send(args) => {
-            pause = args.pause;
-            send(args, rendezvous, &net).await
-        }
+        Command::Send(args) => send(args, pause, rendezvous, &net).await,
         Command::Receive {
             code,
             from,
@@ -245,7 +248,8 @@ async fn main() -> ExitCode {
             limit,
         } => {
             let options = ReceiveFlags {
-                output,
+                output: output.map(arg_path),
+                from_menu: pause,
                 overwrite,
                 yes,
                 copy,
@@ -273,7 +277,7 @@ async fn main() -> ExitCode {
         }
     };
     if pause {
-        ui::pause();
+        ui::pause(code == ExitCode::SUCCESS);
     }
     code
 }
@@ -451,7 +455,13 @@ impl Drop for Reading {
     }
 }
 
-async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Result<()> {
+async fn send(
+    mut args: SendArgs,
+    from_menu: bool,
+    rendezvous: Option<&str>,
+    net: &Net,
+) -> anyhow::Result<()> {
+    args.paths = args.paths.into_iter().map(arg_path).collect();
     if args.to.is_some() && rendezvous.is_some() {
         bail!("--to sends to a paired device directly; it cannot be combined with --rendezvous");
     }
@@ -508,7 +518,7 @@ async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Re
                 .await
                 .map_err(explained)?;
             flags.push_str(&format!(" --rendezvous {url}"));
-            show_code(&waiting.code().to_string(), &flags);
+            show_code(&waiting.code().to_string(), &flags, from_menu);
             pending.show_progress();
             async {
                 let accept = async {
@@ -527,7 +537,7 @@ async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Re
         }
         (None, None) => {
             let code = Code::random()?;
-            show_code(&code.to_string(), &flags);
+            show_code(&code.to_string(), &flags, from_menu);
             pending.show_progress();
             let announcement =
                 portal_net::discovery::announce(&endpoint, mode, &code, &net.discovery);
@@ -577,15 +587,32 @@ fn quote_arg(arg: &str) -> String {
     }
 }
 
-fn show_code(code: &str, flags: &str) {
+/// Shows the code and how to use it. From the file manager's menu, the code
+/// is also copied, since it is usually pasted into a message next.
+fn show_code(code: &str, flags: &str, copy: bool) {
     println!("Code: {}", style(code).bold().cyan());
     println!("\nOn the other machine, run:\n\n  portal receive{flags} {code}\n");
+    if copy && clipboard::set(code).is_ok() {
+        println!("The code is copied to the clipboard.");
+    }
     println!("Waiting for receiver...");
+}
+
+/// Undoes a Windows quirk: `"D:\"` on a command line arrives as `D:"` (the
+/// backslash escapes the quote), e.g. from the right-click menu on a drive.
+/// A path cannot end in a quote there, so it was a backslash.
+fn arg_path(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|p| p.strip_suffix('"')) {
+        Some(p) if cfg!(windows) => PathBuf::from(format!("{p}\\")),
+        _ => path,
+    }
 }
 
 /// `portal receive` options besides the code and network settings.
 struct ReceiveFlags {
     output: Option<PathBuf>,
+    /// Started from the file manager's menu.
+    from_menu: bool,
     overwrite: bool,
     yes: bool,
     copy: bool,
@@ -607,6 +634,7 @@ async fn receive(
 ) -> anyhow::Result<()> {
     let ReceiveFlags {
         output,
+        from_menu,
         overwrite,
         yes,
         copy,
@@ -685,7 +713,7 @@ async fn receive(
     endpoint.close().await;
     let summary = match result {
         Ok(Received::Files(summary)) => summary,
-        Ok(Received::Text(text)) => return show_text(&text, copy),
+        Ok(Received::Text(text)) => return show_text(&text, copy, from_menu),
         Err(NetError::Cancelled) => {
             println!("Declined. Nothing was saved.");
             return Ok(());
@@ -719,8 +747,9 @@ async fn receive(
     Ok(())
 }
 
-/// Prints a received text message, or copies it to the clipboard.
-fn show_text(text: &str, copy: bool) -> anyhow::Result<()> {
+/// Prints a received text message, or copies it to the clipboard. From the
+/// file manager's menu, it does both and keeps the window open.
+fn show_text(text: &str, copy: bool, from_menu: bool) -> anyhow::Result<()> {
     if copy {
         clipboard::set(text)?;
         let chars = text.chars().count();
@@ -733,6 +762,12 @@ fn show_text(text: &str, copy: bool) -> anyhow::Result<()> {
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         ui::success("Received a text message:\n");
         println!("{}", ui::terminal_safe(text));
+        if from_menu {
+            ui::keep_open();
+            if clipboard::set(text).is_ok() {
+                println!("\n(Also copied to the clipboard.)");
+            }
+        }
     } else {
         print!("{text}");
     }
@@ -797,6 +832,7 @@ async fn pair(
     })?;
     config::set_own_name(&my_name)?;
     let saved = config::add_device(&paired.name, paired.id)?;
+    menu::refresh_devices();
     ui::success(format!(
         "Paired with {}. This device is \"{my_name}\" to it.",
         style(&saved).bold()
@@ -833,6 +869,7 @@ fn devices() -> anyhow::Result<()> {
 /// `portal unpair`: forgets a paired device.
 fn unpair(name: &str) -> anyhow::Result<()> {
     let removed = config::remove_device(name)?;
+    menu::refresh_devices();
     ui::success(format!(
         "Forgot {removed}. It can no longer send to or receive from this device without a code."
     ));
@@ -931,5 +968,15 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_quoted_by_the_menu_keeps_its_backslash() {
+        assert_eq!(arg_path(PathBuf::from("D:\"")), PathBuf::from(r"D:\"));
+        assert_eq!(
+            arg_path(PathBuf::from(r"C:\Users\me")),
+            PathBuf::from(r"C:\Users\me")
+        );
     }
 }

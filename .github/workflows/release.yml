@@ -47,7 +47,7 @@ jobs:
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # rustup reads rust-toolchain.toml; the target is added to that toolchain.
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }} -p portal-cli -p portal-rendezvous
@@ -56,7 +56,7 @@ jobs:
       - name: Upload unsigned programs for signing
         if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
         id: unsigned
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned-${{ matrix.target }}
           path: |
@@ -64,7 +64,7 @@ jobs:
             ${{ env.BIN }}/portal-rendezvous.exe
       - name: Sign with SignPath
         if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e # v1.3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
@@ -125,11 +125,11 @@ jobs:
 
       # Lets anyone check that an archive was built here from this tag:
       #   gh attestation verify <archive> --repo MStefa003/portal
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: ${{ env.ARCHIVE }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.target }}
           path: ${{ env.NAME }}.*
@@ -138,17 +138,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: release-*
           merge-multiple: true
 
       # Sign every archive; `portal update` checks these signatures.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install cryptography==44.0.0
@@ -161,13 +161,13 @@ jobs:
           key=$(grep -oP 'const RELEASE_KEY: &str = "\K[^"]+' src/crates/portal-cli/src/update.rs)
           python src/packaging/sign.py verify "$key" dist/*.zip dist/*.tar.gz
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: dist/portal-*
           generate_release_notes: true
 
       # Scoop bucket and Homebrew tap live in this repository; update them.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: main
           path: repo
@@ -187,7 +187,7 @@ jobs:
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: env.WINGET_TOKEN != ''
         with:
           ref: main

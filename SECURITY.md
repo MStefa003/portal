@@ -70,7 +70,7 @@ Every release archive comes with three independent proofs:
    Check it with [minisign](https://jedisct1.github.io/minisign/):
 
    ```console
-   minisign -Vm portal-v0.5.0-x86_64-unknown-linux-gnu.tar.gz -P RWTIdVXMW8Z0RQixMzNSOsaChfzseZPChiIB/jxRwiB7PD9hBKs33lhi
+   minisign -Vm portal-v0.5.1-x86_64-unknown-linux-gnu.tar.gz -P RWTIdVXMW8Z0RQixMzNSOsaChfzseZPChiIB/jxRwiB7PD9hBKs33lhi
    ```
 
    The trusted comment names the file, so a genuine archive cannot be

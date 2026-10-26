@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Signs release archives with Portal's release key, in minisign format.
 
-    python3 packaging/sign.py keygen             # once: prints a new key pair
+    python3 packaging/sign.py keygen SECRET_FILE # new key pair; secret to file
     python3 packaging/sign.py sign FILE...       # writes FILE.minisig
     python3 packaging/sign.py verify KEY FILE... # checks FILE.minisig
 
@@ -40,14 +40,17 @@ def public_key_line(private: Ed25519PrivateKey, key_id: bytes) -> str:
     return base64.b64encode(KEY_ALG + key_id + public).decode()
 
 
-def keygen() -> None:
+def keygen(secret_file: str) -> None:
+    # The secret goes only into the file, never to the terminal or its
+    # scrollback; refuse to overwrite a key that may be the only copy.
     key_id = secrets.token_bytes(8)
     seed = secrets.token_bytes(32)
     private = Ed25519PrivateKey.from_private_bytes(seed)
-    print("Secret key (the PORTAL_SIGNING_KEY secret; keep it private and backed up):")
-    print(base64.b64encode(KEY_ALG + key_id + seed).decode())
-    print()
-    print("Public key (RELEASE_KEY in crates/portal-cli/src/update.rs):")
+    with open(secret_file, "x", encoding="ascii") as out:
+        out.write(base64.b64encode(KEY_ALG + key_id + seed).decode() + "
+")
+    print(f"Secret key written to {secret_file}; keep it private and backed up.")
+    print("Public key (for RELEASE_KEYS in crates/portal-cli/src/update.rs):")
     print(public_key_line(private, key_id))
 
 
@@ -105,8 +108,8 @@ def verify(public_line: str, paths: list[str]) -> None:
 
 def main() -> None:
     match sys.argv[1:]:
-        case ["keygen"]:
-            keygen()
+        case ["keygen", secret_file]:
+            keygen(secret_file)
         case ["sign", *paths] if paths:
             sign(paths)
         case ["verify", key, *paths] if paths:

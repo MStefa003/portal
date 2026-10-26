@@ -112,11 +112,18 @@ portal context-menu --remove   # take it away
 ```
 
 On Windows it appears for files and folders (on Windows 11 under "Show more
-options"), and "Send to → Portal" sends several selected items at once. On
-macOS it is a Finder Quick Action; on Linux, a Nautilus script and a Dolphin
-service menu. A terminal window opens with the code and stays until the
-transfer is done. (The macOS and Linux versions are new and less tested than
-the Windows one.)
+options"), and "Send to → Portal" sends several selected items at once.
+Right-clicking the empty space in a folder offers "Send this folder with
+Portal" and "Receive with Portal here". Paired devices appear in these menus
+too, so sending to one is a single click. On macOS it is a Finder Quick
+Action; on Linux, a Nautilus script, a Dolphin service menu, a Nemo action
+and a Thunar custom action.
+
+A terminal window opens with the code, already copied to the clipboard, and
+closes a few seconds after the transfer is done (it stays open after an
+error, or to show a received text message). If Portal is moved or updated,
+the menu follows the next time Portal runs. (The macOS and Linux versions
+are new and less tested than the Windows one.)
 
 ### Speed limit
 

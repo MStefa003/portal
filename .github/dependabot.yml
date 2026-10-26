@@ -10,6 +10,9 @@ updates:
       # One pull request for all compatible updates instead of dozens.
       cargo:
         update-types: [minor, patch]
+  # The workflows pin every action to a commit hash (a moved or hijacked tag
+  # cannot change what runs next to the signing key); Dependabot updates
+  # the hash and its version comment together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
