@@ -1,25 +1,25 @@
 PackageIdentifier: MStefa003.Portal
-PackageVersion: 0.4.0
+PackageVersion: 0.5.0
 InstallerType: zip
 NestedInstallerType: portable
 Commands:
 - portal
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-x86_64-pc-windows-msvc.zip
-  InstallerSha256: 2CE6E1E802540742B5B746BB90D3F6E617FBDE9D0994744B3FF3B853B7026469
+  InstallerUrl: https://github.com/MStefa003/portal/releases/download/v0.5.0/portal-v0.5.0-x86_64-pc-windows-msvc.zip
+  InstallerSha256: 25659136A7732201A550F88D85D978F08B07C35FDE1D6CADCBB5A9E98F0282BC
   NestedInstallerFiles:
-  - RelativeFilePath: portal-v0.4.0-x86_64-pc-windows-msvc\portal.exe
+  - RelativeFilePath: portal-v0.5.0-x86_64-pc-windows-msvc\portal.exe
     PortableCommandAlias: portal
-  - RelativeFilePath: portal-v0.4.0-x86_64-pc-windows-msvc\portal-rendezvous.exe
+  - RelativeFilePath: portal-v0.5.0-x86_64-pc-windows-msvc\portal-rendezvous.exe
     PortableCommandAlias: portal-rendezvous
 - Architecture: arm64
-  InstallerUrl: https://github.com/MStefa003/portal/releases/download/v0.4.0/portal-v0.4.0-aarch64-pc-windows-msvc.zip
-  InstallerSha256: 6F84CF1477C0E02E309ADA69C38E286D84C36A40D75E2DD17F65906DE1F66C5B
+  InstallerUrl: https://github.com/MStefa003/portal/releases/download/v0.5.0/portal-v0.5.0-aarch64-pc-windows-msvc.zip
+  InstallerSha256: AA7D4607029D4423FAC1BE875540B425F2C1947552AF53E5E90CC52274228550
   NestedInstallerFiles:
-  - RelativeFilePath: portal-v0.4.0-aarch64-pc-windows-msvc\portal.exe
+  - RelativeFilePath: portal-v0.5.0-aarch64-pc-windows-msvc\portal.exe
     PortableCommandAlias: portal
-  - RelativeFilePath: portal-v0.4.0-aarch64-pc-windows-msvc\portal-rendezvous.exe
+  - RelativeFilePath: portal-v0.5.0-aarch64-pc-windows-msvc\portal-rendezvous.exe
     PortableCommandAlias: portal-rendezvous
 ManifestType: installer
 ManifestVersion: 1.6.0
