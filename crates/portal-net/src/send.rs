@@ -7,7 +7,7 @@
 //!    │◄─ Offer, ManifestPart × n ───│
 //!    │── Accept ───────────────────►│
 //!    │── Want × n, WantDone ───────►│   hashes go into a shared queue
-//!    │◄═ chunks on 4 data streams ══│   workers: read → zstd → write
+//!    │◄═ chunks on 16 data streams ═│   workers: read → zstd → write
 //!    │── Done ─────────────────────►│
 //!    │◄──────── close ──────────────│
 //! ```
@@ -37,9 +37,11 @@ use crate::event::{Event, Reporter};
 use crate::limit::{self, RateLimit};
 use crate::{endpoint, hang_up, hello};
 
-/// Parallel data streams per transfer: enough to keep the pipe full while
-/// one worker waits on disk or compression.
-const DATA_STREAMS: usize = 4;
+/// Parallel data streams per transfer. Each stream's flow-control window is
+/// kept small (see `endpoint.rs`), so it takes this many to keep a fast,
+/// distant link full; they also keep it full while some workers wait on disk
+/// or compression.
+pub(crate) const DATA_STREAMS: usize = 16;
 /// How long the paired receiver has to connect (hole punching included).
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -85,10 +87,16 @@ pub async fn send(
     options: &SendOptions,
     reporter: Reporter,
 ) -> Result<(), NetError> {
-    let conn = tokio::time::timeout(ACCEPT_TIMEOUT, accept_from(endpoint, peer))
-        .await
-        .map_err(|_| NetError::Timeout("waiting for the receiver to connect"))??;
+    let conn = accept_paired(endpoint, peer).await?;
     send_on(&conn, payload, options, reporter).await
+}
+
+/// The first half of [`send`]: waits for the receiver `peer` to connect, for
+/// as long as hole punching may take.
+pub async fn accept_paired(endpoint: &Endpoint, peer: EndpointId) -> Result<Connection, NetError> {
+    tokio::time::timeout(ACCEPT_TIMEOUT, accept_from(endpoint, peer))
+        .await
+        .map_err(|_| NetError::Timeout("waiting for the receiver to connect"))?
 }
 
 /// Sends `payload` to the already-authenticated receiver on `conn`, then

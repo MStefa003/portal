@@ -79,6 +79,20 @@ fn duration(d: Duration) -> String {
     }
 }
 
+/// A bar for reading `total_bytes` of files before sending them; hidden
+/// until it is given a draw target.
+pub fn reading_bar(total_bytes: u64) -> ProgressBar {
+    let style = ProgressStyle::with_template(
+        "Reading files [{bar:20}] {percent:>3}%  {decimal_bytes_per_sec:>10}",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar())
+    .progress_chars("█░");
+    let bar = ProgressBar::hidden();
+    bar.set_style(style);
+    bar.set_length(total_bytes);
+    bar
+}
+
 impl Progress {
     pub fn new() -> Self {
         let style = ProgressStyle::with_template(

@@ -11,13 +11,15 @@ use crate::event::Route;
 
 /// How long a sender waits to reach a relay before sharing direct addresses only.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(10);
-/// Bytes one stream may have in flight. QUIC's default (1.25 MB) is sized for
-/// 100 Mbit/s at 100 ms and caps faster or longer links; this fills about a
-/// gigabit at 100 ms with the 4 data streams of a transfer.
-const STREAM_WINDOW: u32 = 8 * 1024 * 1024;
+/// Bytes one stream may have in flight. Kept small enough that lost packets
+/// cannot leave more holes in one stream than the QUIC library will buffer
+/// (1024; past that it drops the connection): 2 MiB is under 1,800 packets
+/// even at the smallest packet size, so at most ~900 holes.
+const STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 /// Bytes all streams of a connection may have in flight together; also
-/// bounds the memory a peer can make us buffer.
-const CONNECTION_WINDOW: u32 = 4 * STREAM_WINDOW;
+/// bounds the memory a peer can make us buffer. With every data stream of a
+/// transfer busy this fills about 2.5 Gbit/s at 100 ms.
+const CONNECTION_WINDOW: u32 = crate::send::DATA_STREAMS as u32 * STREAM_WINDOW;
 
 /// Which networks an endpoint uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

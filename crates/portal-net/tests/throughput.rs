@@ -178,3 +178,23 @@ async fn raw_quic() {
     conn.close(0u32.into(), b"");
     let _ = server.await;
 }
+
+/// Scanning one large file, which cannot be split across files like a folder.
+#[test]
+#[ignore = "benchmark; run with --release -- --ignored --nocapture"]
+fn scan_one_large_file() {
+    let total = std::env::var("PORTAL_BENCH_MB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024usize)
+        * MB;
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("video.bin");
+    random_file(&file, total, 7);
+    let start = Instant::now();
+    scan(&file, &ScanOptions::default()).unwrap();
+    println!(
+        "scan one file: {}",
+        rate(total, start.elapsed().as_secs_f64())
+    );
+}

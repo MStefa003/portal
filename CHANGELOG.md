@@ -6,6 +6,23 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
+### Changed
+- `portal send` shows the code at once and reads the files in the
+  background, with a progress bar, while the receiver types the code.
+  Before, a large file had to be read completely first (about 25 s for a
+  20 GB file on a fast SSD).
+- Reading a large file is about twice as fast (0.9 to 1.4–1.8 GB/s), with
+  exactly the same chunks as before, so resuming and skipping unchanged
+  chunks keep working with older versions.
+
+### Fixed
+- Large transfers could abort with "too many gaps in stream buffer" when
+  the receiving machine was busy and packets were lost. Each data stream
+  now has less in flight (2 MiB), with 16 streams instead of 4, so a
+  connection still has 32 MiB in flight in total.
+
 ## [0.4.0] - 2026-10-23
 
 ### Added

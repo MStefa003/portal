@@ -298,8 +298,8 @@ fn receiver_flags(net: &Net) -> String {
     flags
 }
 
-/// What `portal send` sends, and how to describe it once it arrived.
-async fn payload(args: &SendArgs) -> anyhow::Result<(Payload, String)> {
+/// What `portal send` sends. Files are still being read when this returns.
+async fn payload(args: &SendArgs) -> anyhow::Result<Pending> {
     let text = if let Some(text) = &args.text {
         Some(if text == "-" {
             let mut text = String::new();
@@ -333,46 +333,122 @@ async fn payload(args: &SendArgs) -> anyhow::Result<(Payload, String)> {
             "characters"
         };
         println!("Sending a text message ({chars} {noun})");
-        return Ok((Payload::Text(text), "the text".to_owned()));
+        return Ok(Pending::Ready(Payload::Text(text)));
     }
 
+    // Finding the files is quick; reading them is not, so that goes on in
+    // the background while the receiver types the code.
     let options = ScanOptions {
         respect_gitignore: args.respect_gitignore,
     };
     let paths = args.paths.clone();
-    let scan = tokio::task::spawn_blocking(move || portal_core::scan_many(&paths, &options))
+    let plan = tokio::task::spawn_blocking(move || portal_core::plan(&paths, &options))
         .await
         .context("scanning failed")??;
-    for skipped in scan.skipped.iter().take(MAX_SKIPPED_SHOWN) {
+    warn_skipped(plan.skipped());
+    let summary = describe(plan.file_count(), plan.total_bytes(), plan.is_single_file());
+    let name = match plan.root_count() {
+        1 => style(format!("\"{}\"", plan.name())).bold().to_string(),
+        n => format!(
+            "{} and {} more",
+            style(format!("\"{}\"", plan.name())).bold(),
+            n - 1
+        ),
+    };
+    println!("Sending {name} ({summary})");
+
+    let bar = ui::reading_bar(plan.total_bytes());
+    let warned = plan.skipped().len();
+    let read = bar.clone();
+    let task = tokio::task::spawn_blocking(move || plan.read(move |bytes| read.inc(bytes)));
+    Ok(Pending::Reading(Reading { task, bar, warned }))
+}
+
+fn warn_skipped(skipped: &[portal_core::scan::Skipped]) {
+    for skipped in skipped.iter().take(MAX_SKIPPED_SHOWN) {
         let what = skipped
             .path
             .as_deref()
             .map_or_else(|| "an entry".to_owned(), |p| p.display().to_string());
         ui::warn(format!("skipped {what}: {}", skipped.reason));
     }
-    if scan.skipped.len() > MAX_SKIPPED_SHOWN {
+    if skipped.len() > MAX_SKIPPED_SHOWN {
         ui::warn(format!(
             "…and {} more skipped",
-            scan.skipped.len() - MAX_SKIPPED_SHOWN
+            skipped.len() - MAX_SKIPPED_SHOWN
         ));
     }
+}
 
-    let manifest = &scan.manifest;
-    let summary = describe(
-        manifest.file_count(),
-        manifest.total_bytes(),
-        manifest.is_single_file(),
-    );
-    let name = match manifest.root_count() {
-        1 => style(format!("\"{}\"", manifest.name())).bold().to_string(),
-        n => format!(
-            "{} and {} more",
-            style(format!("\"{}\"", manifest.name())).bold(),
-            n - 1
-        ),
-    };
-    println!("Sending {name} ({summary})");
-    Ok((Payload::from(scan), summary))
+/// What `portal send` sends: ready, or files still being read.
+enum Pending {
+    Ready(Payload),
+    Reading(Reading),
+}
+
+type ScanResult = Result<portal_core::Scan, portal_core::scan::ScanError>;
+
+/// Files being read on a blocking thread.
+struct Reading {
+    task: tokio::task::JoinHandle<ScanResult>,
+    bar: indicatif::ProgressBar,
+    /// How many skipped entries were already reported.
+    warned: usize,
+}
+
+impl Pending {
+    /// Shows how far reading has got, if it is not done yet.
+    fn show_progress(&self) {
+        if let Self::Reading(reading) = self
+            && !reading.task.is_finished()
+        {
+            reading
+                .bar
+                .set_draw_target(indicatif::ProgressDrawTarget::stderr());
+        }
+    }
+
+    /// Waits for `connect` and for the files to be read, whichever takes
+    /// longer. Fails as soon as either fails.
+    async fn ready<T>(
+        self,
+        connect: impl Future<Output = anyhow::Result<T>>,
+    ) -> anyhow::Result<(T, Payload)> {
+        let mut reading = match self {
+            Self::Ready(payload) => return Ok((connect.await?, payload)),
+            Self::Reading(reading) => reading,
+        };
+        tokio::pin!(connect);
+        tokio::select! {
+            read = &mut reading.task => {
+                let payload = reading.finish(read)?;
+                Ok((connect.await?, payload))
+            }
+            connected = &mut connect => {
+                let connected = connected?;
+                let read = (&mut reading.task).await;
+                Ok((connected, reading.finish(read)?))
+            }
+        }
+    }
+}
+
+impl Reading {
+    fn finish(
+        &mut self,
+        read: Result<ScanResult, tokio::task::JoinError>,
+    ) -> anyhow::Result<Payload> {
+        self.bar.finish_and_clear();
+        let scan = read.context("scanning failed")??;
+        warn_skipped(scan.skipped.get(self.warned..).unwrap_or_default());
+        Ok(Payload::from(scan))
+    }
+}
+
+impl Drop for Reading {
+    fn drop(&mut self) {
+        self.bar.finish_and_clear();
+    }
 }
 
 async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Result<()> {
@@ -381,7 +457,7 @@ async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Re
     }
     // Check the device name before scanning what may be a large folder.
     let device = args.to.as_deref().map(config::device).transpose()?;
-    let (payload, summary) = payload(&args).await?;
+    let pending = payload(&args).await?;
     let options = SendOptions {
         rate_limit: args.limit,
     };
@@ -395,7 +471,10 @@ async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Re
     let mut flags = receiver_flags(net);
 
     let progress = Progress::new();
-    let result = match (&device, rendezvous) {
+    let explained = |e| explain(e, rendezvous, Role::Send);
+    // Each way of connecting yields the connection and the payload, read
+    // while the receiver connected.
+    let result: anyhow::Result<Payload> = match (&device, rendezvous) {
         (Some(device), _) => {
             let me = config::own_name()?.unwrap_or_else(ui::hostname);
             println!(
@@ -403,62 +482,85 @@ async fn send(args: SendArgs, rendezvous: Option<&str>, net: &Net) -> anyhow::Re
                 style(&device.name).bold(),
                 quote_arg(&me)
             );
+            pending.show_progress();
             let announcement = portal_net::trust::announce(&endpoint, &net.discovery);
             async {
-                let conn = tokio::time::timeout(
-                    SEND_TIMEOUT,
-                    portal_net::accept_from(&endpoint, device.id),
-                )
-                .await
-                .map_err(|_| NetError::Timeout("waiting for the device"))??;
+                let accept = async {
+                    tokio::time::timeout(
+                        SEND_TIMEOUT,
+                        portal_net::accept_from(&endpoint, device.id),
+                    )
+                    .await
+                    .map_err(|_| NetError::Timeout("waiting for the device"))?
+                    .map_err(explained)
+                };
+                let (conn, payload) = pending.ready(accept).await?;
                 drop(announcement);
-                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send)).await
+                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send))
+                    .await
+                    .map_err(explained)?;
+                Ok(payload)
             }
             .await
         }
         (None, Some(url)) => {
             let waiting = portal_net::rendezvous::allocate(url)
                 .await
-                .map_err(|e| explain(e, rendezvous, Role::Send))?;
+                .map_err(explained)?;
             flags.push_str(&format!(" --rendezvous {url}"));
             show_code(&waiting.code().to_string(), &flags);
+            pending.show_progress();
             async {
-                let peer = waiting.pair(&endpoint, mode).await?;
-                portal_net::send(
-                    &endpoint,
-                    peer,
-                    &payload,
-                    &options,
-                    progress.reporter(Role::Send),
-                )
-                .await
+                let accept = async {
+                    let peer = waiting.pair(&endpoint, mode).await.map_err(explained)?;
+                    portal_net::accept_paired(&endpoint, peer)
+                        .await
+                        .map_err(explained)
+                };
+                let (conn, payload) = pending.ready(accept).await?;
+                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send))
+                    .await
+                    .map_err(explained)?;
+                Ok(payload)
             }
             .await
         }
         (None, None) => {
             let code = Code::random()?;
             show_code(&code.to_string(), &flags);
+            pending.show_progress();
             let announcement =
                 portal_net::discovery::announce(&endpoint, mode, &code, &net.discovery);
             async {
-                let conn = tokio::time::timeout(
-                    SEND_TIMEOUT,
-                    portal_net::direct::accept(&endpoint, &code),
-                )
-                .await
-                .map_err(|_| NetError::Timeout("waiting for the receiver"))??;
+                let accept = async {
+                    tokio::time::timeout(SEND_TIMEOUT, portal_net::direct::accept(&endpoint, &code))
+                        .await
+                        .map_err(|_| NetError::Timeout("waiting for the receiver"))?
+                        .map_err(explained)
+                };
+                let (conn, payload) = pending.ready(accept).await?;
                 drop(announcement);
-                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send)).await
+                portal_net::send_on(&conn, &payload, &options, progress.reporter(Role::Send))
+                    .await
+                    .map_err(explained)?;
+                Ok(payload)
             }
             .await
         }
     };
     let stats = progress.finish();
     endpoint.close().await;
-    result.map_err(|e| explain(e, rendezvous, Role::Send))?;
-    match payload {
+    match result? {
         Payload::Text(_) => ui::success("Sent the text"),
-        Payload::Files { .. } => ui::success(format!("Sent {summary}{}", Stats::suffix(stats))),
+        Payload::Files { manifest, .. } => ui::success(format!(
+            "Sent {}{}",
+            describe(
+                manifest.file_count(),
+                manifest.total_bytes(),
+                manifest.is_single_file()
+            ),
+            Stats::suffix(stats)
+        )),
     }
     Ok(())
 }

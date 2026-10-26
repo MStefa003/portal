@@ -11,8 +11,10 @@ use std::thread;
 
 use ignore::WalkBuilder;
 
-use crate::chunk::chunk_reader;
-use crate::manifest::{Entry, EntryKind, FileMeta, Manifest, ManifestError, Timestamp};
+use crate::chunk::chunk_reader_with;
+use crate::manifest::{
+    Entry, EntryKind, FileMeta, MAX_ENTRIES, Manifest, ManifestError, Timestamp,
+};
 use crate::path::{PARTIAL_DIR_NAME, PathError, SafeRelPath};
 
 /// Files read at the same time while scanning. More stops helping once the
@@ -95,6 +97,12 @@ pub fn scan(root: &Path, options: &ScanOptions) -> Result<Scan, ScanError> {
 /// Like [`scan`], for several files and folders sent together: each becomes
 /// a top-level entry of one manifest. Their names must differ.
 pub fn scan_many(roots: &[PathBuf], options: &ScanOptions) -> Result<Scan, ScanError> {
+    plan(roots, options)?.read(|_| {})
+}
+
+/// The first, quick part of [`scan_many`]: finds every file and folder and
+/// their sizes without reading any file. [`Plan::read`] does the rest.
+pub fn plan(roots: &[PathBuf], options: &ScanOptions) -> Result<Plan, ScanError> {
     if roots.is_empty() {
         return Err(ScanError::Nothing);
     }
@@ -110,29 +118,109 @@ pub fn scan_many(roots: &[PathBuf], options: &ScanOptions) -> Result<Scan, ScanE
             &mut collision_keys,
         )?;
     }
-    let entries = read_files(planned, &mut skipped);
-    let manifest = Manifest {
-        version: Manifest::version_for(roots.len()),
-        entries,
-    };
-    manifest.validate()?;
-    Ok(Scan {
-        manifest,
+    if planned.len() > MAX_ENTRIES {
+        return Err(ManifestError::TooManyEntries.into());
+    }
+    Ok(Plan {
+        planned,
         roots: roots.to_vec(),
         skipped,
     })
 }
 
+/// The files and folders to send, found by [`plan`]; their files are not
+/// read yet. The numbers are as found on disk: files that turn out to be
+/// unreadable are left out of the final [`Scan`].
+#[derive(Debug)]
+pub struct Plan {
+    planned: Vec<Planned>,
+    roots: Vec<PathBuf>,
+    skipped: Vec<Skipped>,
+}
+
+impl Plan {
+    /// The name of the first top-level item.
+    pub fn name(&self) -> &str {
+        self.planned
+            .first()
+            .map_or("", |p| p.rel().first_component())
+    }
+
+    /// Number of top-level items.
+    pub fn root_count(&self) -> usize {
+        self.roots.len()
+    }
+
+    /// Whether this is a single file rather than a folder or several items.
+    pub fn is_single_file(&self) -> bool {
+        matches!(self.planned[..], [Planned::File { .. }])
+    }
+
+    /// Number of files.
+    pub fn file_count(&self) -> u64 {
+        self.files().count() as u64
+    }
+
+    /// Sum of the file sizes.
+    pub fn total_bytes(&self) -> u64 {
+        self.files().map(Metadata::len).sum()
+    }
+
+    /// Entries left out so far.
+    pub fn skipped(&self) -> &[Skipped] {
+        &self.skipped
+    }
+
+    fn files(&self) -> impl Iterator<Item = &Metadata> {
+        self.planned.iter().filter_map(|p| match p {
+            Planned::File { meta, .. } => Some(meta),
+            Planned::Dir(_) => None,
+        })
+    }
+
+    /// Reads and chunks every file, calling `progress` with the number of
+    /// bytes read as it goes (from several threads), and builds the manifest.
+    /// [`Scan::skipped`] includes the entries of [`Plan::skipped`].
+    pub fn read(self, progress: impl Fn(u64) + Sync) -> Result<Scan, ScanError> {
+        let Self {
+            planned,
+            roots,
+            mut skipped,
+        } = self;
+        let entries = read_files(planned, &mut skipped, &progress)?;
+        let manifest = Manifest {
+            version: Manifest::version_for(roots.len()),
+            entries,
+        };
+        manifest.validate()?;
+        Ok(Scan {
+            manifest,
+            roots,
+            skipped,
+        })
+    }
+}
+
 /// An entry found while walking, before the content of its file is read.
+#[derive(Debug)]
 enum Planned {
-    /// Complete already: a folder, or a file given directly.
-    Ready(Entry),
-    /// A file found inside a folder.
+    Dir(SafeRelPath),
     File {
         rel: SafeRelPath,
         path: PathBuf,
         meta: Metadata,
+        /// Given directly rather than found in a folder: failing to read it
+        /// fails the scan instead of skipping it.
+        root: bool,
     },
+}
+
+impl Planned {
+    fn rel(&self) -> &SafeRelPath {
+        match self {
+            Self::Dir(rel) | Self::File { rel, .. } => rel,
+        }
+    }
 }
 
 fn scan_root(
@@ -163,16 +251,14 @@ fn scan_root(
     }
 
     if meta.is_file() {
-        let file = file_meta(root, &meta).map_err(io_err)?;
-        entries.push(Planned::Ready(Entry {
-            path: root_path,
-            kind: EntryKind::File(file),
-        }));
+        entries.push(Planned::File {
+            rel: root_path,
+            path: root.to_path_buf(),
+            meta,
+            root: true,
+        });
     } else if meta.is_dir() {
-        entries.push(Planned::Ready(Entry {
-            path: root_path.clone(),
-            kind: EntryKind::Dir,
-        }));
+        entries.push(Planned::Dir(root_path.clone()));
         walk(root, &root_path, options, entries, skipped, collision_keys);
     } else {
         return Err(ScanError::Unsupported(root.to_path_buf()));
@@ -263,16 +349,14 @@ fn walk(
         }
 
         if file_type.is_dir() {
-            entries.push(Planned::Ready(Entry {
-                path: rel_path,
-                kind: EntryKind::Dir,
-            }));
+            entries.push(Planned::Dir(rel_path));
         } else if file_type.is_file() {
             match entry.metadata() {
                 Ok(meta) => entries.push(Planned::File {
                     rel: rel_path,
                     path: path.to_path_buf(),
                     meta,
+                    root: false,
                 }),
                 Err(e) => skip(skipped, path, format!("could not read: {e}")),
             }
@@ -284,8 +368,12 @@ fn walk(
 
 /// Chunks the planned files on several threads (most of a scan is reading
 /// and hashing) and returns the entries in their original order, leaving out
-/// files that could not be read.
-fn read_files(planned: Vec<Planned>, skipped: &mut Vec<Skipped>) -> Vec<Entry> {
+/// files in folders that could not be read.
+fn read_files(
+    planned: Vec<Planned>,
+    skipped: &mut Vec<Skipped>,
+    progress: &(impl Fn(u64) + Sync),
+) -> Result<Vec<Entry>, ScanError> {
     let files: Vec<usize> = planned
         .iter()
         .enumerate()
@@ -304,7 +392,7 @@ fn read_files(planned: Vec<Planned>, skipped: &mut Vec<Skipped>) -> Vec<Entry> {
             scope.spawn(|| {
                 while let Some(&i) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
                     if let Planned::File { path, meta, .. } = &planned[i] {
-                        let _ = results[i].set(file_meta(path, meta));
+                        let _ = results[i].set(file_meta(path, meta, progress));
                     }
                 }
             });
@@ -314,18 +402,24 @@ fn read_files(planned: Vec<Planned>, skipped: &mut Vec<Skipped>) -> Vec<Entry> {
     let mut entries = Vec::with_capacity(planned.len());
     for (planned, result) in planned.into_iter().zip(results) {
         match planned {
-            Planned::Ready(entry) => entries.push(entry),
-            Planned::File { rel, path, .. } => match result.into_inner() {
+            Planned::Dir(path) => entries.push(Entry {
+                path,
+                kind: EntryKind::Dir,
+            }),
+            Planned::File {
+                rel, path, root, ..
+            } => match result.into_inner() {
                 Some(Ok(file)) => entries.push(Entry {
                     path: rel,
                     kind: EntryKind::File(file),
                 }),
+                Some(Err(source)) if root => return Err(ScanError::Io { path, source }),
                 Some(Err(e)) => skip(skipped, &path, format!("could not read: {e}")),
                 None => skip(skipped, &path, "could not read".into()),
             },
         }
     }
-    entries
+    Ok(entries)
 }
 
 fn skip(skipped: &mut Vec<Skipped>, path: &Path, reason: String) {
@@ -336,8 +430,8 @@ fn skip(skipped: &mut Vec<Skipped>, path: &Path, reason: String) {
     });
 }
 
-fn file_meta(path: &Path, meta: &Metadata) -> io::Result<FileMeta> {
-    let chunked = chunk_reader(File::open(path)?)?;
+fn file_meta(path: &Path, meta: &Metadata, progress: impl Fn(u64)) -> io::Result<FileMeta> {
+    let chunked = chunk_reader_with(File::open(path)?, progress)?;
     Ok(FileMeta {
         size: chunked.size,
         mtime: meta.modified().ok().and_then(Timestamp::from_system_time),
@@ -518,6 +612,28 @@ mod tests {
             scan_many(&[], &ScanOptions::default()),
             Err(ScanError::Nothing)
         ));
+    }
+
+    #[test]
+    fn plan_counts_before_reading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join("b")).unwrap();
+        fs::write(root.join("a.txt"), "hello").unwrap();
+        fs::write(root.join("b/x.txt"), "x").unwrap();
+
+        let plan = plan(&[root], &ScanOptions::default()).unwrap();
+        assert_eq!(plan.name(), "proj");
+        assert_eq!((plan.file_count(), plan.total_bytes()), (2, 6));
+        assert!(!plan.is_single_file());
+        let read = std::sync::atomic::AtomicU64::new(0);
+        let scan = plan
+            .read(|n| {
+                read.fetch_add(n, Ordering::Relaxed);
+            })
+            .unwrap();
+        assert_eq!(read.into_inner(), 6);
+        assert_eq!(scan.manifest.total_bytes(), 6);
     }
 
     #[test]

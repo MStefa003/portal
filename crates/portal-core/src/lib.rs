@@ -24,6 +24,6 @@ pub mod source;
 pub use hash::Hash;
 pub use manifest::Manifest;
 pub use path::SafeRelPath;
-pub use scan::{Scan, ScanOptions, scan, scan_many};
+pub use scan::{Plan, Scan, ScanOptions, plan, scan, scan_many};
 pub use sink::{OverwritePolicy, Sink, SinkError, Summary, VerifiedChunk};
 pub use source::{OpenFile, Source, SourceError};

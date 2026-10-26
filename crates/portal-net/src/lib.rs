@@ -36,7 +36,7 @@ pub use error::NetError;
 pub use event::{Event, Reporter, Route};
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 pub use receive::{Confirm, ReceiveOptions, Received, receive, receive_on};
-pub use send::{Payload, SendOptions, accept_from, send, send_on};
+pub use send::{Payload, SendOptions, accept_from, accept_paired, send, send_on};
 
 use std::time::Duration;
 

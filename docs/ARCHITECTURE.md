@@ -126,7 +126,7 @@ sender                                     receiver
 control reader task ─► channel ─┐          control: Want batches, then WantDone
                                 ▼
           select! { control msg | worker finished }
-Want hashes ─► queue ─► worker ×4 ─ data stream ─► reader task per stream
+Want hashes ─► queue ─► worker ×16 ─ data stream ─► reader task per stream
                  read file (blocking pool)          decompress (blocking pool)
                  zstd if smaller                          │ bounded channel (64)
                                                           ▼
