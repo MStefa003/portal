@@ -203,6 +203,7 @@ impl Plan {
 
 /// An entry found while walking, before the content of its file is read.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // mostly files; boxing would allocate per file
 enum Planned {
     Dir(SafeRelPath),
     File {

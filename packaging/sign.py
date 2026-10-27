@@ -47,8 +47,7 @@ def keygen(secret_file: str) -> None:
     seed = secrets.token_bytes(32)
     private = Ed25519PrivateKey.from_private_bytes(seed)
     with open(secret_file, "x", encoding="ascii") as out:
-        out.write(base64.b64encode(KEY_ALG + key_id + seed).decode() + "
-")
+        out.write(base64.b64encode(KEY_ALG + key_id + seed).decode() + "\n")
     print(f"Secret key written to {secret_file}; keep it private and backed up.")
     print("Public key (for RELEASE_KEYS in crates/portal-cli/src/update.rs):")
     print(public_key_line(private, key_id))
