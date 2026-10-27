@@ -6,6 +6,12 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-27
+
+### Fixed
+- The 0.5.1 release failed while signing and was never published; 0.5.2
+  is the same release with that fixed.
+
 ## [0.5.1] - 2026-10-26
 
 ### Added
