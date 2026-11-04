@@ -50,6 +50,11 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// How long data was flowing.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
     /// " in 3.2s (48.1 MB/s)", or " (already up to date)" if no data had to move.
     pub fn suffix(stats: Option<Self>) -> String {
         let Some(Self { elapsed, bytes }) = stats else {

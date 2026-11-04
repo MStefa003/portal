@@ -84,9 +84,17 @@ keep using a fresh key each time, so they cannot be linked to a device.
    the same network or through iroh's address lookup (n0's DNS) elsewhere.
    TLS authenticates both IDs; the transfer runs as usual, and the receiver
    still confirms before anything is written.
+3. Or laptop leaves `portal listen` running: it accepts connections over
+   ALPN `portal-push/1` from its paired devices' node IDs only, and
+   `portal send --to laptop` dials it (while still accepting laptop's
+   connection as in step 2, whichever comes first). Each offer is
+   confirmed in the terminal, with a desktop notification, unless it was
+   started with `--yes`.
 
 Pairing grants no more than a code would: a paired device can only offer a
-transfer while the other side is running `portal receive --from` it.
+transfer while the other side is running `portal receive --from` it or
+`portal listen`. With `portal listen --yes`, paired devices can save files
+into the download folder without asking, which is what that flag is for.
 `portal unpair` forgets a device.
 
 ### Threat model
@@ -99,7 +107,7 @@ transfer while the other side is running `portal receive --from` it.
 | Network observer | see that two hosts talk QUIC (and to which relay) | read anything: TLS 1.3 inside QUIC |
 | iroh relay operator | see node IDs and encrypted traffic volume | read or alter traffic |
 | Someone guessing codes | take one guess per code (1 in 1.68 M) and make that transfer fail | try again on the same code |
-| Someone with a stolen settings folder | act as that device towards its paired devices | do anything without a paired device running `portal receive --from` it |
+| Someone with a stolen settings folder | act as that device towards its paired devices | do anything without a paired device running `portal receive --from` it or `portal listen` |
 | Malicious sender | send arbitrary bytes | write outside the destination, overwrite without consent, exhaust memory (see below) |
 
 ## Transfer flow

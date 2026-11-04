@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use iroh::endpoint::{Connection, QuicTransportConfig, VarInt, presets};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey, TransportAddr};
-use portal_proto::{ALPN, PAIR_ALPN, TRUST_ALPN};
+use portal_proto::{ALPN, PAIR_ALPN, PUSH_ALPN, TRUST_ALPN};
 
 use crate::error::NetError;
 use crate::event::Route;
@@ -46,6 +46,25 @@ pub async fn bind_as(
     listen: bool,
     key: Option<SecretKey>,
 ) -> Result<Endpoint, NetError> {
+    let alpns = if listen {
+        vec![PAIR_ALPN.to_vec(), ALPN.to_vec(), TRUST_ALPN.to_vec()]
+    } else {
+        vec![]
+    };
+    bind_with(mode, alpns, key).await
+}
+
+/// An endpoint with this device's identity `key` that paired devices send
+/// to ([`PUSH_ALPN`]), for [`crate::trust::accept_push`].
+pub async fn bind_listener(mode: NetMode, key: SecretKey) -> Result<Endpoint, NetError> {
+    bind_with(mode, vec![PUSH_ALPN.to_vec()], Some(key)).await
+}
+
+async fn bind_with(
+    mode: NetMode,
+    alpns: Vec<Vec<u8>>,
+    key: Option<SecretKey>,
+) -> Result<Endpoint, NetError> {
     let builder = match mode {
         NetMode::Internet => Endpoint::builder(presets::N0),
         NetMode::Loopback => Endpoint::builder(presets::Minimal)
@@ -54,11 +73,6 @@ pub async fn bind_as(
             .clear_ip_transports()
             .bind_addr("127.0.0.1:0")
             .map_err(NetError::bind)?,
-    };
-    let alpns = if listen {
-        vec![PAIR_ALPN.to_vec(), ALPN.to_vec(), TRUST_ALPN.to_vec()]
-    } else {
-        vec![]
     };
     let builder = match key {
         Some(key) => builder.secret_key(key),

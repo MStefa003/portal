@@ -76,6 +76,25 @@ pub fn reset_download_dir() -> anyhow::Result<()> {
     }
 }
 
+/// Holds "off" when desktop notifications are turned off.
+const NOTIFICATIONS_FILE: &str = "notifications";
+
+/// Whether desktop notifications are on (the default). An unreadable
+/// setting counts as on.
+pub fn notifications_enabled() -> bool {
+    let Ok(dir) = config_dir() else {
+        return true;
+    };
+    fs::read_to_string(dir.join(NOTIFICATIONS_FILE)).map_or(true, |text| text.trim() != "off")
+}
+
+/// Turns desktop notifications on or off.
+pub fn set_notifications(on: bool) -> anyhow::Result<()> {
+    let file = config_file(NOTIFICATIONS_FILE)?;
+    fs::write(&file, if on { "on" } else { "off" })
+        .with_context(|| format!("could not write {}", file.display()))
+}
+
 /// This device's long-term secret key, as 64 hex characters. Created on
 /// first use. It identifies this device to the devices it was paired with.
 const IDENTITY_FILE: &str = "identity";
@@ -93,8 +112,13 @@ pub struct Device {
     pub id: EndpointId,
 }
 
+/// The paired device with node ID `id`, if there is one.
+pub fn device_by_id(id: EndpointId) -> Option<Device> {
+    devices().ok()?.into_iter().find(|d| d.id == id)
+}
+
 /// Creates the config folder and returns `file` inside it.
-fn config_file(file: &str) -> anyhow::Result<PathBuf> {
+pub fn config_file(file: &str) -> anyhow::Result<PathBuf> {
     let config = config_dir()?;
     fs::create_dir_all(&config)
         .with_context(|| format!("could not create {}", config.display()))?;

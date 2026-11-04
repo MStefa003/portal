@@ -11,7 +11,9 @@
 //!   it, [`receive`] connects to the sender.
 //! - Trusted devices, paired once with a code ([`trust`]): the sender waits
 //!   for the device with [`accept_from`], the receiver connects with
-//!   [`trust::dial`]. No code is needed.
+//!   [`trust::dial`]. No code is needed. A device can also wait for its
+//!   paired devices to send ([`bind_listener`] + [`trust::accept_push`]);
+//!   a sender reaches it with [`trust::push`].
 //!
 //! [`doctor`] checks what works on the current network.
 //! Progress is reported through a [`Reporter`] callback so the CLI (and later
@@ -31,7 +33,7 @@ mod send;
 pub mod trust;
 
 pub use discovery::{DhtNetwork, Discovery};
-pub use endpoint::{NetMode, bind, bind_as, local_addr, route};
+pub use endpoint::{NetMode, bind, bind_as, bind_listener, local_addr, route};
 pub use error::NetError;
 pub use event::{Event, Reporter, Route};
 pub use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};

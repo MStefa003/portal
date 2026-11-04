@@ -133,6 +133,17 @@ TLS authenticates both node IDs, so no code is involved. The peer protocol
 then runs on that connection as usual, including the receiver's choice to
 accept or decline.
 
+A device can also wait for transfers (`portal listen`). It binds with its
+long-term key, accepts only ALPN `portal-push/1`, announces itself on mDNS
+the same way, and accepts connections **from its paired devices' node IDs
+only**; anything else is closed. A sender to a paired device dials the
+device's node ID with `portal-push/1` while it also waits for the device
+to dial it with `portal/1`, and uses whichever connection comes first.
+Either way the peer protocol is unchanged: the receiver opens the control
+stream and the sender the data streams, whichever side dialed. Older
+versions never dial with `portal-push/1` and do not listen for it, so they
+keep working with `portal receive --from`.
+
 ## Rendezvous protocol (version 1, opt-in)
 
 Used when `--rendezvous <url>` or `PORTAL_RENDEZVOUS` is set.

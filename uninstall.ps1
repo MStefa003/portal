@@ -13,7 +13,12 @@ if ($userPath) {
 # The right-click menu entries added by `portal context-menu`.
 Remove-Item -LiteralPath 'HKCU:\Software\Classes\*\shell\Portal' -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath 'HKCU:\Software\Classes\Directory\shell\Portal' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKCU:\Software\Classes\Directory\Background\shell\Portal' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath 'HKCU:\Software\Classes\Directory\Background\shell\PortalReceive' -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Portal.lnk') -Force -ErrorAction SilentlyContinue
+
+# What lets Windows show Portal's notifications.
+Remove-Item -LiteralPath 'HKCU:\Software\Classes\AppUserModelId\MStefa003.Portal' -Recurse -Force -ErrorAction SilentlyContinue
 
 # `return`, not `exit`: under `irm | iex`, exit would close the user's window.
 if (Test-Path $dest) {

@@ -45,6 +45,11 @@ Save it into C:\Users\you\Downloads? [Y/n]
 `portal receive` asks before saving anything; `--yes` skips the question
 (it is never asked when the input is not a terminal, e.g. in scripts).
 
+Run `portal receive` without a code and it asks for one: Tab completes each
+word once its first letters fit only one code word (the few it could still
+be are shown while they don't), and a mistyped word turns red before anyone
+is contacted, so a typo does not use up the code.
+
 Received files go into the current folder. To always save them somewhere
 else, set a download folder once (`portal dir` shows it, `portal dir --reset`
 forgets it), or pick one for a single transfer with `--output`:
@@ -103,6 +108,29 @@ laptop$ portal receive --from desk
 
 `portal devices` lists paired devices and `portal unpair <name>` forgets one.
 The receiver is still asked before anything is saved.
+
+To receive without typing anything at all, leave `portal listen` running on
+the receiving device. Sending to it with `--to` then starts at once:
+
+```console
+laptop$ portal listen
+Listening for desk. On one of them, run:
+
+  portal send <files> --to laptop
+
+desk$   portal send ./project --to laptop
+```
+
+`portal listen` asks before saving each transfer (and shows a notification
+so you notice); `portal listen --yes` accepts everything your paired devices
+send. Only paired devices can send to it.
+
+### Notifications
+
+Portal shows a desktop notification when a transfer started from the
+right-click menu ends, when `portal listen` receives something or needs an
+answer, and when a transfer ran for over a minute. `portal notifications off`
+turns them off (`on` turns them back on).
 
 ### Right-click "Send with Portal"
 

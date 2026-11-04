@@ -60,6 +60,11 @@ pub const PAIR_ALPN: &[u8] = b"portal-pair/1";
 /// side sends its [`Device`] description.
 pub const TRUST_ALPN: &[u8] = b"portal-trust/1";
 
+/// ALPN for sending to a paired device that waits for transfers (`portal
+/// listen`): the sender connects to it, then the transfer proceeds as with
+/// [`ALPN`]. Only a device's paired devices are accepted.
+pub const PUSH_ALPN: &[u8] = b"portal-push/1";
+
 /// Maximum size of one control-stream frame.
 pub const MAX_CONTROL_FRAME: usize = 1024 * 1024;
 

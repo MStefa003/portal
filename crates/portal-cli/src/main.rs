@@ -5,6 +5,8 @@ mod clipboard;
 mod config;
 mod doctor;
 mod menu;
+mod notify;
+mod prompt;
 mod ui;
 mod update;
 
@@ -113,6 +115,31 @@ enum Command {
         #[arg(long, value_name = "SPEED", value_parser = ui::parse_rate)]
         limit: Option<u64>,
     },
+    /// Wait for paired devices to send, so they need no code and nobody has
+    /// to type anything here: they run `portal send <files> --to <this
+    /// device>`. Runs until stopped with Ctrl+C.
+    Listen {
+        /// Folder to save into (defaults to the one set with `portal dir`, or
+        /// the current directory).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Overwrite existing files without asking.
+        #[arg(long)]
+        overwrite: bool,
+
+        /// Accept every transfer from paired devices without asking first.
+        #[arg(short, long)]
+        yes: bool,
+
+        /// Copy text messages to the clipboard instead of printing them.
+        #[arg(long)]
+        copy: bool,
+
+        /// Receive at most this fast, e.g. 500k or 10MB/s.
+        #[arg(long, value_name = "SPEED", value_parser = ui::parse_rate)]
+        limit: Option<u64>,
+    },
     /// Pair with another device once, so you can send between the two later
     /// without a code. Run it without a code on one device, and with the
     /// code it shows on the other.
@@ -161,6 +188,14 @@ enum Command {
         #[arg(long, conflicts_with = "path")]
         reset: bool,
     },
+    /// Turn desktop notifications on or off, or show whether they are on.
+    /// They appear when a transfer from the right-click menu or `portal
+    /// listen` ends or needs an answer, and after long transfers.
+    Notifications {
+        /// on or off.
+        #[arg(value_enum)]
+        state: Option<Switch>,
+    },
     /// Print a shell completion script.
     ///
     /// PowerShell: portal completions powershell >> $PROFILE
@@ -171,6 +206,12 @@ enum Command {
         /// The shell to write the script for.
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
 }
 
 /// `portal send` options.
@@ -257,6 +298,23 @@ async fn main() -> ExitCode {
             };
             receive(code, from, options, rendezvous, &net).await
         }
+        Command::Listen {
+            output,
+            overwrite,
+            yes,
+            copy,
+            limit,
+        } => {
+            let options = ReceiveFlags {
+                output: output.map(arg_path),
+                from_menu: false,
+                overwrite,
+                yes,
+                copy,
+                limit,
+            };
+            listen(options, rendezvous, &net).await
+        }
         Command::Pair { code, name } => pair(code, name, rendezvous, &net).await,
         Command::Devices => devices(),
         Command::Unpair { device } => unpair(&device),
@@ -264,6 +322,7 @@ async fn main() -> ExitCode {
         Command::Update { check, force } => update::run(check, force).await,
         Command::ContextMenu { remove } => menu::run(remove),
         Command::Dir { path, reset } => dir(path.as_deref(), reset),
+        Command::Notifications { state } => notifications(state),
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "portal", &mut std::io::stdout());
             Ok(())
@@ -273,6 +332,9 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{} {e:#}", style("Error:").red().bold());
+            if pause {
+                notify::show("Transfer failed", &first_line(&format!("{e:#}")));
+            }
             ExitCode::FAILURE
         }
     };
@@ -488,21 +550,32 @@ async fn send(
         (Some(device), _) => {
             let me = config::own_name()?.unwrap_or_else(ui::hostname);
             println!(
-                "Waiting for {}. On it, run:\n\n  portal receive{flags} --from {}\n",
+                "Waiting for {}. If `portal listen` is running on it, this starts by itself; otherwise, on it, run:\n\n  portal receive{flags} --from {}\n",
                 style(&device.name).bold(),
                 quote_arg(&me)
             );
             pending.show_progress();
             let announcement = portal_net::trust::announce(&endpoint, &net.discovery);
             async {
+                // The device either connects to us (`portal receive --from`)
+                // or waits for us to connect (`portal listen`).
                 let accept = async {
-                    tokio::time::timeout(
-                        SEND_TIMEOUT,
-                        portal_net::accept_from(&endpoint, device.id),
-                    )
-                    .await
-                    .map_err(|_| NetError::Timeout("waiting for the device"))?
-                    .map_err(explained)
+                    let incoming = portal_net::accept_from(&endpoint, device.id);
+                    let outgoing = portal_net::trust::push(
+                        &endpoint,
+                        EndpointAddr::from(device.id),
+                        &net.discovery,
+                    );
+                    let either = async {
+                        tokio::select! {
+                            conn = incoming => conn,
+                            conn = outgoing => conn,
+                        }
+                    };
+                    tokio::time::timeout(SEND_TIMEOUT, either)
+                        .await
+                        .map_err(|_| NetError::Timeout("waiting for the device"))?
+                        .map_err(explained)
                 };
                 let (conn, payload) = pending.ready(accept).await?;
                 drop(announcement);
@@ -560,19 +633,40 @@ async fn send(
     };
     let stats = progress.finish();
     endpoint.close().await;
-    match result? {
-        Payload::Text(_) => ui::success("Sent the text"),
-        Payload::Files { manifest, .. } => ui::success(format!(
-            "Sent {}{}",
+    let (what, how) = match result? {
+        Payload::Text(_) => ("the text".to_owned(), String::new()),
+        Payload::Files { manifest, .. } => (
             describe(
                 manifest.file_count(),
                 manifest.total_bytes(),
-                manifest.is_single_file()
+                manifest.is_single_file(),
             ),
-            Stats::suffix(stats)
-        )),
+            Stats::suffix(stats),
+        ),
+    };
+    let to = device
+        .as_ref()
+        .map(|d| format!(" to {}", d.name))
+        .unwrap_or_default();
+    ui::success(format!("Sent {what}{to}{how}"));
+    if worth_notifying(from_menu, stats) {
+        notify::show("Sent", &format!("{what}{to}"));
     }
     Ok(())
+}
+
+/// Whether to tell the desktop that a transfer ended: when it was started
+/// from the file manager's menu, or ran long enough in a terminal that the
+/// user has probably looked away.
+fn worth_notifying(from_menu: bool, stats: Option<Stats>) -> bool {
+    from_menu
+        || (std::io::IsTerminal::is_terminal(&std::io::stdout())
+            && stats.is_some_and(|s| s.elapsed() >= notify::LONG_TRANSFER))
+}
+
+/// The first line of an error, for a notification.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_owned()
 }
 
 /// Quotes a device name for the command line if it needs it.
@@ -650,13 +744,7 @@ async fn receive(
         (None, Some(code)) => Sender::Code(Code::parse(&code)?),
         (None, None) => Sender::Code(Code::parse(&ask_for_code()?)?),
     };
-    let dest = match output {
-        Some(dir) => dir,
-        None => match config::download_dir()? {
-            Some(dir) => dir,
-            None => std::env::current_dir().context("could not determine the current folder")?,
-        },
-    };
+    let dest = destination(output)?;
 
     // Ask only when someone can answer; scripts and pipes accept as before.
     let confirm: Option<Confirm> = if yes || !ui::can_ask() {
@@ -713,7 +801,13 @@ async fn receive(
     endpoint.close().await;
     let summary = match result {
         Ok(Received::Files(summary)) => summary,
-        Ok(Received::Text(text)) => return show_text(&text, copy, from_menu),
+        Ok(Received::Text(text)) => {
+            show_text(&text, copy, from_menu)?;
+            if from_menu {
+                notify::show("Received a text message", text_notice(copy || from_menu));
+            }
+            return Ok(());
+        }
         Err(NetError::Cancelled) => {
             println!("Declined. Nothing was saved.");
             return Ok(());
@@ -727,23 +821,189 @@ async fn receive(
                 "{name} did not start sending. Run `portal send <files> --to <this device>` on {name}, then try again."
             );
         }
-        Err(e) => {
-            let e = explain(e, rendezvous, Role::Receive);
-            // Data arrived before the failure and was kept for a retry.
-            if stats.is_some() && dest.join(PARTIAL_DIR_NAME).exists() {
-                return Err(anyhow!(
-                    "{e:#}\n\nWhat arrived so far was kept. If the sender runs `portal send` again with the same files, only the rest is transferred."
-                ));
-            }
-            return Err(e);
-        }
+        Err(e) => return Err(receive_error(e, stats, &dest, rendezvous)),
     };
+    let what = describe(summary.files, summary.bytes, false);
     ui::success(format!(
-        "Received {} into {}{}",
-        describe(summary.files, summary.bytes, false),
+        "Received {what} into {}{}",
         dest.display(),
         Stats::suffix(stats),
     ));
+    if worth_notifying(from_menu, stats) {
+        notify::show(
+            &format!("Received {what}"),
+            &format!("Saved into {}", dest.display()),
+        );
+    }
+    Ok(())
+}
+
+/// Where received files go: `output`, else the saved download folder, else
+/// the current one.
+fn destination(output: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match output {
+        Some(dir) => Ok(dir),
+        None => match config::download_dir()? {
+            Some(dir) => Ok(dir),
+            None => std::env::current_dir().context("could not determine the current folder"),
+        },
+    }
+}
+
+/// Explains a failed receive, saying so if what arrived was kept for a retry.
+fn receive_error(
+    e: NetError,
+    stats: Option<Stats>,
+    dest: &Path,
+    rendezvous: Option<&str>,
+) -> anyhow::Error {
+    let e = explain(e, rendezvous, Role::Receive);
+    if stats.is_some() && dest.join(PARTIAL_DIR_NAME).exists() {
+        return anyhow!(
+            "{e:#}\n\nWhat arrived so far was kept. If the sender runs `portal send` again with the same files, only the rest is transferred."
+        );
+    }
+    e
+}
+
+/// Where a received text message went, for its notification.
+fn text_notice(copied: bool) -> &'static str {
+    if copied {
+        "It is on the clipboard."
+    } else {
+        "It is shown in the Portal window."
+    }
+}
+
+/// `portal listen`: receives from paired devices, one transfer after
+/// another, until stopped.
+async fn listen(flags: ReceiveFlags, rendezvous: Option<&str>, net: &Net) -> anyhow::Result<()> {
+    let ReceiveFlags {
+        output,
+        overwrite,
+        yes,
+        copy,
+        limit,
+        ..
+    } = flags;
+    if rendezvous.is_some() {
+        bail!(
+            "paired devices find this one without a rendezvous server; run it without --rendezvous"
+        );
+    }
+    let devices = config::devices()?;
+    if devices.is_empty() {
+        bail!("no devices are paired yet. Pair one first with `portal pair`");
+    }
+    if !yes && !ui::can_ask() {
+        bail!(
+            "nobody is here to accept transfers. Run `portal listen --yes` to accept everything paired devices send"
+        );
+    }
+    let dest = destination(output)?;
+    let me = config::own_name()?.unwrap_or_else(ui::hostname);
+    let endpoint = portal_net::bind_listener(net.mode, config::identity()?).await?;
+    let _announcement = portal_net::trust::announce(&endpoint, &net.discovery);
+
+    let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+    println!(
+        "Listening for {}. On one of them, run:\n\n  portal send <files> --to {}\n",
+        names.join(", "),
+        quote_arg(&me)
+    );
+    println!(
+        "Received files are saved into {}{}. Press Ctrl+C to stop.",
+        dest.display(),
+        if yes { " without asking" } else { "" }
+    );
+    loop {
+        println!("\nWaiting for a transfer...");
+        // Read again each time, so pairing or unpairing takes effect at once.
+        let conn =
+            portal_net::trust::accept_push(&endpoint, |id| config::device_by_id(id).is_some())
+                .await?;
+        let name = config::device_by_id(conn.remote_id())
+            .map_or_else(|| conn.remote_id().fmt_short().to_string(), |d| d.name);
+        println!("{} is sending:", style(&name).bold());
+
+        let confirm: Option<Confirm> = if yes {
+            None
+        } else {
+            let question = format!("Save it into {}?", dest.display());
+            let asker = name.clone();
+            Some(Arc::new(move |offer: &Offer| {
+                notify::show(
+                    &format!("{asker} wants to send \"{}\"", offer.name),
+                    &format!(
+                        "{}. Answer in the Portal window.",
+                        describe(offer.files, offer.bytes, false)
+                    ),
+                );
+                ui::confirm(&question)
+            }))
+        };
+        let options = ReceiveOptions {
+            dest: dest.clone(),
+            overwrite: if overwrite {
+                OverwritePolicy::Always
+            } else {
+                OverwritePolicy::Never
+            },
+            confirm,
+            rate_limit: limit,
+        };
+        let progress = Progress::new();
+        let result = portal_net::receive_on(&conn, options, progress.reporter(Role::Receive)).await;
+        let stats = progress.finish();
+        match result {
+            Ok(Received::Files(summary)) => {
+                let what = describe(summary.files, summary.bytes, false);
+                ui::success(format!(
+                    "Received {what} from {name} into {}{}",
+                    dest.display(),
+                    Stats::suffix(stats)
+                ));
+                notify::show(
+                    &format!("Received {what} from {name}"),
+                    &format!("Saved into {}", dest.display()),
+                );
+            }
+            Ok(Received::Text(text)) => {
+                show_text(&text, copy, false)?;
+                notify::show(
+                    &format!("Received a text message from {name}"),
+                    text_notice(copy),
+                );
+            }
+            Err(NetError::Cancelled) => println!("Declined. Nothing was saved."),
+            Err(e) => {
+                let e = receive_error(e, stats, &dest, None);
+                eprintln!("{} {e:#}", style("Error:").red().bold());
+                notify::show(
+                    &format!("A transfer from {name} failed"),
+                    &first_line(&format!("{e:#}")),
+                );
+            }
+        }
+    }
+}
+
+/// `portal notifications`: shows or changes whether they are on.
+fn notifications(state: Option<Switch>) -> anyhow::Result<()> {
+    match state {
+        None if config::notifications_enabled() => {
+            println!("Notifications are on. `portal notifications off` turns them off.");
+        }
+        None => println!("Notifications are off. `portal notifications on` turns them on."),
+        Some(Switch::On) => {
+            config::set_notifications(true)?;
+            ui::success("Notifications are on");
+        }
+        Some(Switch::Off) => {
+            config::set_notifications(false)?;
+            ui::success("Notifications are off");
+        }
+    }
     Ok(())
 }
 
@@ -902,8 +1162,12 @@ fn ask_for_code() -> anyhow::Result<String> {
     if !term.is_term() {
         bail!("no code given. Usage: portal receive <CODE>");
     }
-    term.write_str("Enter the code shown by the sender: ")?;
-    Ok(term.read_line()?)
+    let question = "Enter the code shown by the sender: ";
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        term.write_str(question)?;
+        return Ok(term.read_line()?);
+    }
+    prompt::read_code(&term, question)
 }
 
 /// Turns library errors into advice a user can act on.

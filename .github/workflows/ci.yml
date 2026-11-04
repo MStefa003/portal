@@ -47,6 +47,39 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo +stable test --workspace --locked
 
+  # Transfers between this build and published releases, both ways, so a
+  # protocol change cannot silently break people on an older version:
+  # the newest release, the first with text messages (protocol 2) and the
+  # first release of all.
+  compat:
+    name: works with ${{ matrix.release }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: [latest, v0.3.0, v0.1.0]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Download ${{ matrix.release }}
+        env:
+          RELEASE: ${{ matrix.release }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "$RELEASE" = latest ]; then
+            # The redirect names the tag, without the rate-limited API.
+            RELEASE=$(curl -fsSI "https://github.com/$REPO/releases/latest" | tr -d '\r' | sed -n 's|^location:.*/tag/||Ip')
+          fi
+          name="portal-$RELEASE-x86_64-unknown-linux-gnu"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://github.com/$REPO/releases/download/$RELEASE/$name.tar.gz"
+          curl -fsSLO "https://github.com/$REPO/releases/download/$RELEASE/$name.tar.gz.sha256"
+          sha256sum -c "$name.tar.gz.sha256"
+          tar xzf "$name.tar.gz"
+          echo "PORTAL_OLD_BIN=$RUNNER_TEMP/$name/portal" >> "$GITHUB_ENV"
+      - run: cargo test -p portal-cli --test cli --locked compatible_with_an_older_release -- --nocapture
+
   # Known vulnerabilities (RustSec), licenses and where crates come from.
   # See deny.toml.
   dependencies:

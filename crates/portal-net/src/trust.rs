@@ -10,6 +10,10 @@
 //! for the device with [`crate::accept_from`]; the receiver [`dial`]s the
 //! sender's node ID. TLS authenticates both node IDs, so no code is needed:
 //! each side talks only to the one node it expects.
+//!
+//! The other way round, a device can wait for transfers from its paired
+//! devices ([`accept_push`], `portal listen`), and a sender [`push`]es to
+//! it. A sender tries both at once: whichever connects first is used.
 
 use std::time::Duration;
 
@@ -17,7 +21,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId, TransportAddr};
 use portal_proto::code::Code;
 use portal_proto::frame::{read_msg, write_msg};
-use portal_proto::{ALPN, Device, MAX_DEVICE_NAME, TRUST_ALPN, sanitize};
+use portal_proto::{ALPN, Device, MAX_DEVICE_NAME, PUSH_ALPN, TRUST_ALPN, sanitize};
 
 use crate::discovery::{self, Announcement, Discovery};
 use crate::error::NetError;
@@ -143,38 +147,84 @@ pub async fn dial(
     discovery: &Discovery,
     timeout: Duration,
 ) -> Result<Connection, NetError> {
-    let expected = sender.id;
-    let attempts = async {
-        loop {
-            let local = if discovery.mdns {
-                tokio::time::timeout(LOCAL_WAIT, discovery::find_device(expected, discovery))
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            let addr = match local {
-                Some(found) => EndpointAddr::from_parts(
-                    expected,
-                    sender.addrs.iter().cloned().chain(found.addrs),
-                ),
-                None => sender.clone(),
-            };
-            let only_id = !addr.addrs.iter().any(|a| matches!(a, TransportAddr::Ip(_)));
-            match endpoint.connect(addr, ALPN).await {
-                Ok(conn) if conn.remote_id() == expected => return Ok(conn),
-                Ok(conn) => {
-                    conn.close(2u32.into(), b"unexpected peer");
-                    return Err(NetError::WrongPeer);
-                }
-                Err(e) => tracing::info!(%e, only_id, "the device is not reachable yet"),
+    tokio::time::timeout(
+        timeout,
+        connect_until_reached(endpoint, sender, discovery, ALPN),
+    )
+    .await
+    .map_err(|_| NetError::DeviceNotFound)?
+}
+
+/// Sender to a trusted device that waits for transfers ([`accept_push`]):
+/// connects to `device` with [`PUSH_ALPN`], retrying until it is reachable.
+/// Never gives up by itself; the caller races it against other ways of
+/// connecting, or adds a timeout. Then [`crate::send_on`] the connection.
+pub async fn push(
+    endpoint: &Endpoint,
+    device: EndpointAddr,
+    discovery: &Discovery,
+) -> Result<Connection, NetError> {
+    connect_until_reached(endpoint, device, discovery, PUSH_ALPN).await
+}
+
+/// Connects to `peer` with `alpn`, looking for it on the local network
+/// before each attempt, until it answers.
+async fn connect_until_reached(
+    endpoint: &Endpoint,
+    peer: EndpointAddr,
+    discovery: &Discovery,
+    alpn: &[u8],
+) -> Result<Connection, NetError> {
+    let expected = peer.id;
+    loop {
+        let local = if discovery.mdns {
+            tokio::time::timeout(LOCAL_WAIT, discovery::find_device(expected, discovery))
+                .await
+                .ok()
+        } else {
+            None
+        };
+        let addr = match local {
+            Some(found) => {
+                EndpointAddr::from_parts(expected, peer.addrs.iter().cloned().chain(found.addrs))
             }
-            tokio::time::sleep(DIAL_RETRY).await;
+            None => peer.clone(),
+        };
+        let only_id = !addr.addrs.iter().any(|a| matches!(a, TransportAddr::Ip(_)));
+        match endpoint.connect(addr, alpn).await {
+            Ok(conn) if conn.remote_id() == expected => return Ok(conn),
+            Ok(conn) => {
+                conn.close(2u32.into(), b"unexpected peer");
+                return Err(NetError::WrongPeer);
+            }
+            Err(e) => tracing::info!(%e, only_id, "the device is not reachable yet"),
         }
-    };
-    tokio::time::timeout(timeout, attempts)
-        .await
-        .map_err(|_| NetError::DeviceNotFound)?
+        tokio::time::sleep(DIAL_RETRY).await;
+    }
+}
+
+/// A device waiting for transfers: returns the next connection from a
+/// device that `trusted` accepts, made with [`PUSH_ALPN`]. Any other
+/// connection is closed and ignored. `endpoint` must come from
+/// [`crate::bind_listener`]; [`crate::receive_on`] the connection.
+pub async fn accept_push(
+    endpoint: &Endpoint,
+    trusted: impl Fn(EndpointId) -> bool,
+) -> Result<Connection, NetError> {
+    loop {
+        let incoming = endpoint
+            .accept()
+            .await
+            .ok_or_else(|| NetError::Internal("the endpoint was closed".into()))?;
+        match incoming.await {
+            Ok(conn) if conn.alpn() == PUSH_ALPN && trusted(conn.remote_id()) => return Ok(conn),
+            Ok(conn) => {
+                tracing::warn!(peer = %conn.remote_id().fmt_short(), "refused a device that is not paired");
+                conn.close(2u32.into(), b"not paired");
+            }
+            Err(e) => tracing::warn!(%e, "an incoming connection failed; still waiting"),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,27 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `portal listen` waits for transfers from paired devices, so `portal send
+  --to <device>` starts at once with nothing to type on the receiving side.
+  It asks before saving each transfer; `--yes` accepts them all. Only paired
+  devices can send to it. A sender to a paired device tries both ways at
+  once, so `portal receive --from` keeps working, also with older versions.
+- Desktop notifications when a transfer started from the right-click menu
+  ends, when `portal listen` receives something or needs an answer, and
+  after transfers longer than a minute. `portal notifications off` turns
+  them off.
+- Typing a code at the `portal receive` prompt: Tab completes each word,
+  the words it could still be are shown, and mistyped words turn red.
+
+### Changed
+- CI checks transfers in both directions against the newest release, 0.3.0
+  and 0.1.0.
+
+### Fixed
+- The Windows uninstall script now also removes the "Send this folder with
+  Portal" and "Receive with Portal here" menu entries.
+
 ## [0.5.2] - 2026-10-27
 
 ### Fixed

@@ -559,6 +559,65 @@ async fn sender_only_accepts_the_paired_receiver() {
     .unwrap();
 }
 
+/// A device waiting for transfers takes them from its paired devices only.
+#[tokio::test]
+async fn listening_device_accepts_only_paired_senders() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("f.txt");
+        fs::write(&src, "pushed").unwrap();
+        let payload = Payload::from(scan(&src, &ScanOptions::default()).unwrap());
+        let off = portal_net::Discovery {
+            mdns: false,
+            dht: None,
+        };
+
+        let paired_key = portal_net::SecretKey::generate();
+        let paired_id = paired_key.public();
+        let listener =
+            portal_net::bind_listener(NetMode::Loopback, portal_net::SecretKey::generate())
+                .await
+                .unwrap();
+        let listener_addr = portal_net::local_addr(&listener, NetMode::Loopback).await;
+        let dest = tmp.path().join("in");
+        let listen = tokio::spawn({
+            let dest = dest.clone();
+            async move {
+                let conn = portal_net::trust::accept_push(&listener, |id| id == paired_id)
+                    .await
+                    .unwrap();
+                assert_eq!(conn.remote_id(), paired_id);
+                portal_net::receive_on(&conn, receive_options(&dest), quiet()).await
+            }
+        });
+
+        // A stranger is turned away; the listener keeps waiting.
+        let stranger = portal_net::bind(NetMode::Loopback, false).await.unwrap();
+        let refused = tokio::time::timeout(Duration::from_secs(5), async {
+            let conn = portal_net::trust::push(&stranger, listener_addr.clone(), &off)
+                .await
+                .unwrap();
+            conn.closed().await
+        })
+        .await;
+        assert!(refused.is_ok(), "the stranger's connection was closed");
+
+        let sender = portal_net::bind_as(NetMode::Loopback, true, Some(paired_key))
+            .await
+            .unwrap();
+        let conn = portal_net::trust::push(&sender, listener_addr, &off)
+            .await
+            .unwrap();
+        portal_net::send_on(&conn, &payload, &SendOptions::default(), quiet())
+            .await
+            .unwrap();
+        files(listen.await.unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("f.txt")).unwrap(), "pushed");
+    })
+    .await
+    .unwrap();
+}
+
 fn receive_options(dest: &Path) -> ReceiveOptions {
     ReceiveOptions {
         dest: dest.to_path_buf(),

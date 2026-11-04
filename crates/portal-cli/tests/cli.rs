@@ -91,21 +91,30 @@ fn rendezvous() -> String {
 /// Runs `portal send` and `portal receive` with `flags` on both sides and
 /// checks that the folder arrived.
 fn transfer_between_two_processes(flags: &[&str]) {
+    let this = std::path::Path::new(env!("CARGO_BIN_EXE_portal"));
+    transfer_with(this, this, flags);
+}
+
+/// Like [`transfer_between_two_processes`], with the `sender` and `receiver`
+/// programs given (one may be an older release).
+fn transfer_with(sender: &std::path::Path, receiver: &std::path::Path, flags: &[&str]) {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
     let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
     let src = tmp.path().join("project");
     std::fs::create_dir_all(src.join("sub")).unwrap();
     std::fs::write(src.join("hello.txt"), "hello from portal").unwrap();
     std::fs::write(src.join("sub/data.bin"), vec![42u8; 2_000_000]).unwrap();
     let dest = tmp.path().join("received");
 
-    let mut sender = portal()
+    let mut sender = Command::new(sender)
         .args(flags)
         .arg("send")
         .arg(&src)
         .env_remove("PORTAL_RENDEZVOUS")
+        .env("PORTAL_CONFIG_DIR", &config)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -126,11 +135,12 @@ fn transfer_between_two_processes(flags: &[&str]) {
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("sender printed a code");
 
-    let out = portal()
+    let out = Command::new(receiver)
         .args(flags)
         .args(["receive", &code, "--output"])
         .arg(&dest)
         .env_remove("PORTAL_RENDEZVOUS")
+        .env("PORTAL_CONFIG_DIR", &config)
         .output()
         .unwrap();
     assert!(
@@ -150,6 +160,73 @@ fn transfer_between_two_processes(flags: &[&str]) {
     );
 }
 
+/// The flags that make `portal` find its peer in a private DHT on this
+/// machine, which lives as long as the returned testnet.
+fn private_dht() -> (mainline::Testnet, Vec<String>) {
+    let net = mainline::Testnet::builder(10).build().unwrap();
+    let mut flags = vec!["--loopback".to_owned()];
+    for node in &net.bootstrap {
+        flags.push("--dht-bootstrap".to_owned());
+        flags.push(node.clone());
+    }
+    (net, flags)
+}
+
+/// Transfers between this build and an older release in both directions,
+/// through a rendezvous server and through the DHT, plus text messages
+/// where the release has them. Runs only when `PORTAL_OLD_BIN` names the
+/// older `portal` program (CI downloads releases for this).
+#[test]
+fn compatible_with_an_older_release() {
+    let Some(old) = std::env::var_os("PORTAL_OLD_BIN") else {
+        eprintln!("PORTAL_OLD_BIN is not set; skipping");
+        return;
+    };
+    let old = std::path::PathBuf::from(old);
+    let new = std::path::Path::new(env!("CARGO_BIN_EXE_portal"));
+    let version = Command::new(&old).arg("--version").output().unwrap();
+    let version = String::from_utf8(version.stdout).unwrap();
+    eprintln!("checking against {}", version.trim());
+
+    let url = rendezvous();
+    let (_dht, dht_flags) = private_dht();
+    let dht_flags: Vec<&str> = dht_flags.iter().map(String::as_str).collect();
+    for flags in [&["--loopback", "--rendezvous", &url][..], &dht_flags] {
+        transfer_with(&old, new, flags);
+        transfer_with(new, &old, flags);
+    }
+
+    // Text messages came with 0.3.0 (protocol 2).
+    let number = version.split_whitespace().last().unwrap_or_default();
+    let mut parts = number.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if (major, minor) < (0, 3) {
+        return;
+    }
+    for (sender, receiver) in [(old.as_path(), new), (new, old.as_path())] {
+        let text = "from one version to another";
+        let config = tempfile::tempdir().unwrap();
+        let args = os(&["--loopback", "--rendezvous", &url, "send", "--text", text]);
+        let args: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
+        let (mut child, code, drain) =
+            start_and_read_with(Command::new(sender), &args, config.path(), "Code: ");
+        let out = Command::new(receiver)
+            .args(["--loopback", "--rendezvous", &url, "receive", &code])
+            .env_remove("PORTAL_RENDEZVOUS")
+            .env("PORTAL_CONFIG_DIR", config.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(child.wait().unwrap().success());
+        drain.join().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).ends_with(text));
+    }
+}
+
 /// Paired through a real rendezvous server.
 #[test]
 fn send_and_receive_through_a_rendezvous_server() {
@@ -160,12 +237,7 @@ fn send_and_receive_through_a_rendezvous_server() {
 /// No server: the receiver finds the sender in a (private) DHT.
 #[test]
 fn send_and_receive_through_the_dht() {
-    let net = mainline::Testnet::builder(10).build().unwrap();
-    let mut flags = vec!["--loopback".to_owned()];
-    for node in &net.bootstrap {
-        flags.push("--dht-bootstrap".to_owned());
-        flags.push(node.clone());
-    }
+    let (_net, flags) = private_dht();
     let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
     transfer_between_two_processes(&flags);
 }
@@ -190,10 +262,20 @@ fn start_and_read(
     config: &std::path::Path,
     prefix: &'static str,
 ) -> (std::process::Child, String, std::thread::JoinHandle<()>) {
+    start_and_read_with(portal(), args, config, prefix)
+}
+
+/// [`start_and_read`] for `program`, e.g. an older release.
+fn start_and_read_with(
+    mut program: Command,
+    args: &[&std::ffi::OsStr],
+    config: &std::path::Path,
+    prefix: &'static str,
+) -> (std::process::Child, String, std::thread::JoinHandle<()>) {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    let mut child = portal()
+    let mut child = program
         .args(args)
         .env_remove("PORTAL_RENDEZVOUS")
         .env("PORTAL_CONFIG_DIR", config)
