@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-05
+
 ### Added
 - `portal listen` waits for transfers from paired devices, so `portal send
   --to <device>` starts at once with nothing to type on the receiving side.
