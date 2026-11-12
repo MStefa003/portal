@@ -8,8 +8,10 @@ name: Desktop
 # Runs when the desktop app or its packaging changes, by hand, and from
 # release.yml (with `tag`), whose release then carries the files built here.
 on:
+  # Other branches are covered by their pull request; running for both would
+  # ask for every Mac runner twice.
   push:
-    branches: ["**"]
+    branches: [main]
     paths:
       - "crates/**"
       - "Cargo.toml"
@@ -36,6 +38,11 @@ on:
         description: The release tag, e.g. v0.6.0, used in the file names.
         type: string
         required: true
+
+# A newer push replaces a test run still waiting; release runs always finish.
+concurrency:
+  group: desktop-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ !inputs.tag }}
 
 env:
   CARGO_TERM_COLOR: always
