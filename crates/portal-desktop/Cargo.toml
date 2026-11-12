@@ -1,0 +1,36 @@
+[package]
+name = "portal-desktop"
+description = "Portal for the desktop: send and receive files in a window, no terminal needed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+readme = "../../README.md"
+
+# Its own program, installed separately from the `portal` command line tool.
+[[bin]]
+name = "portal-desktop"
+path = "src/main.rs"
+
+[dependencies]
+iced.workspace = true
+portal-core.workspace = true
+portal-net.workspace = true
+portal-proto.workspace = true
+png.workspace = true
+rfd.workspace = true
+tokio.workspace = true
+
+# The build script runs on the build machine, so this is the host's cfg.
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true
+
+[dev-dependencies]
+mainline.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

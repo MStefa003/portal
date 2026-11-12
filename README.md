@@ -223,6 +223,32 @@ proves it was built by this repository's release workflow. See
 [SECURITY.md](SECURITY.md) for how to check the signature yourself and how
 to report a vulnerability.
 
+### Desktop app (optional)
+
+Portal Desktop is the same Portal in a window, for anyone who would rather
+not use a terminal: drop files on it to get a code, or type a code to
+receive. It is a separate program, so installing the command line tool does
+not install it, and the other way around. Each one can send to the other.
+
+Windows (PowerShell):
+
+```console
+irm https://raw.githubusercontent.com/MStefa003/portal/main/install-desktop.ps1 | iex
+```
+
+macOS and Linux:
+
+```console
+curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/install-desktop.sh | sh
+```
+
+Without a terminal, download it from the
+[Releases](https://github.com/MStefa003/portal/releases) page:
+`portal-desktop-…-setup.exe` (Windows installer), `portal-desktop-….dmg`
+(macOS: drag Portal to Applications) or `portal-desktop-….tar.gz` (Linux).
+These are signed and checksummed like the archives above. It uses the same
+settings as the command line tool, such as the download folder.
+
 ## Uninstalling
 
 Windows (PowerShell):
@@ -240,10 +266,14 @@ curl -fsSL https://raw.githubusercontent.com/MStefa003/portal/main/uninstall.sh 
 This removes Portal and its right-click menu entries; files you sent or
 received stay where they are, and so do your settings and paired devices.
 
+The desktop app is removed separately, in Settings > Apps on Windows, or
+with `uninstall-desktop.ps1` / `uninstall-desktop.sh` the same way as above.
+
 ## Building
 
 ```console
 cargo build --release
+cargo build --release -p portal-desktop   # the desktop app, left out by default
 ```
 
 Releases are built by `.github/workflows/release.yml` when a `v*` tag is
@@ -263,6 +293,7 @@ see `link: extra operand`, Git's coreutils `link` is shadowing MSVC's
 | `portal-proto` | Wire protocol: message types, versioning, serialization |
 | `portal-net` | iroh/QUIC connections, PAKE handshake, mDNS/DHT discovery, rendezvous client |
 | `portal-cli` | The `portal` binary |
+| `portal-desktop` | The optional desktop app (`portal-desktop`), built with [iced](https://iced.rs) |
 | `portal-rendezvous` | Optional self-hostable server that pairs peers by short code |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/PROTOCOL.md](docs/PROTOCOL.md)

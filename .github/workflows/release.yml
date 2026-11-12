@@ -134,8 +134,18 @@ jobs:
           name: release-${{ matrix.target }}
           path: ${{ env.NAME }}.*
 
+  # Portal Desktop, the optional app with a window, for people who do not use
+  # the command line. Its downloads are separate from the command line tool's
+  # (which never include it): built and tested by desktop.yml, which installs
+  # each one, starts the app and removes it again before anything is published.
+  desktop:
+    uses: ./.github/workflows/desktop.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+
   publish:
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -143,8 +153,14 @@ jobs:
           path: dist
           pattern: release-*
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: desktop-*
+          merge-multiple: true
 
-      # Sign every archive; `portal update` checks these signatures.
+      # Sign every download; `portal update` and the install scripts check
+      # these signatures.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: src
@@ -156,10 +172,11 @@ jobs:
         env:
           PORTAL_SIGNING_KEY: ${{ secrets.PORTAL_SIGNING_KEY }}
         run: |
-          python src/packaging/sign.py sign dist/*.zip dist/*.tar.gz
+          files="dist/*.zip dist/*.tar.gz dist/*.dmg dist/*-setup.exe"
+          python src/packaging/sign.py sign $files
           # The key `portal update` has built in must accept them.
           key=$(grep -oP 'const RELEASE_KEY: &str = "\K[^"]+' src/crates/portal-cli/src/update.rs)
-          python src/packaging/sign.py verify "$key" dist/*.zip dist/*.tar.gz
+          python src/packaging/sign.py verify "$key" $files
 
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
