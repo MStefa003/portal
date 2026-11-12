@@ -9,7 +9,16 @@
 
 - builds Windows, macOS and Linux archives (x86_64 and ARM64) with SHA-256
   files;
-- signs every archive with the release key (`.minisig` files) and checks
+- builds the desktop app separately, with `.github/workflows/desktop.yml`: a
+  Windows installer (`…-setup.exe`, made with NSIS from
+  `packaging/desktop/windows/installer.nsi`) and zip, a macOS disk image
+  holding `Portal.app`, and a Linux archive with a menu entry and icon. It
+  then installs them with `install-desktop.ps1` / `install-desktop.sh` on
+  Windows, macOS and Linux, checks that the app starts, and removes them
+  again; nothing is published unless that works. The same workflow runs
+  whenever the app or its packaging changes. The command line tool's
+  archives and package manifests never include the desktop app;
+- signs every archive and desktop download with the release key (`.minisig` files) and checks
   the signatures against the key built into `portal update`; without the
   `PORTAL_SIGNING_KEY` secret nothing is published;
 - publishes them as a GitHub Release;
@@ -94,6 +103,13 @@ free with its own certificate, from CI:
 3. Add the API token as the repository secret `SIGNPATH_API_TOKEN` and the
    organization ID as the repository *variable* `SIGNPATH_ORGANIZATION_ID`.
 
+The desktop app's `portal-desktop.exe` and installer are not sent to
+SignPath yet: once the project is approved, add them to its artifact
+configuration and give the `desktop` job the same submit step as `build`.
+Until then the installer is unsigned, so a browser download shows a
+SmartScreen warning ("More info", then "Run anyway");
+`install-desktop.ps1` is not affected.
+
 Alternatives: Azure Artifact Signing (paid monthly; for individuals only in
 some countries), or a certificate from a CA on a hardware token, which
 needs a self-hosted Windows runner.
@@ -110,3 +126,8 @@ Needs an Apple Developer Program membership (99 USD per year).
    `APPLE_SIGNING_IDENTITY`, and the team ID as `APPLE_TEAM_ID`.
 3. Create an app-specific password at <https://account.apple.com> and save
    it as `APPLE_APP_PASSWORD`, with your Apple ID email as `APPLE_ID`.
+
+The same secrets sign and notarize `Portal.app` in the desktop disk image
+(with its ticket stapled). Without them it is signed ad hoc, and macOS
+blocks it when opened from a browser download until it is allowed under
+System Settings > Privacy & Security; `install-desktop.sh` is not affected.

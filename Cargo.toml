@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# A plain `cargo build` / `cargo test` leaves out the desktop app, whose GUI
+# dependencies are large. Build it with `-p portal-desktop`.
+default-members = [
+    "crates/portal-cli",
+    "crates/portal-core",
+    "crates/portal-net",
+    "crates/portal-proto",
+    "crates/portal-rendezvous",
+]
 
 [workspace.package]
 version = "0.5.3"
@@ -29,6 +38,8 @@ fastcdc = "5.0.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
 getrandom = "0.4.3"
+# The desktop app's window, drawn in software so it needs no GPU drivers.
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "fira-sans", "image-without-codecs", "tokio", "x11", "wayland"] }
 ignore = "0.4.33"
 indicatif = "0.18.6"
 iroh = { version = "1.4.0", features = ["unstable-net-report"] }
@@ -36,7 +47,12 @@ mainline = { version = "8.0.1", default-features = false, features = ["async"] }
 # Checks the release signature in `portal update`; no dependencies of its own.
 minisign-verify = "0.3.0"
 mdns-sd = { version = "0.21.6", default-features = false, features = ["async"] }
+# Decodes the desktop app's logo (built in) for its window and header.
+png = "0.18.1"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+# The desktop app's file and folder pickers (on Linux through the desktop
+# portal, so no GTK is needed to build).
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
 # For `portal update`, with the TLS setup iroh already uses (no extra builds).
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

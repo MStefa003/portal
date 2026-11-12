@@ -6,6 +6,15 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Portal Desktop: an optional app with a window, for people who do not use
+  the command line. Drop files or folders on it to get a code, or type a
+  code to receive, with progress, an Accept / Decline question and "Open
+  folder" at the end. It is installed on its own
+  (`install-desktop.ps1` / `install-desktop.sh`, a Windows installer, a
+  macOS disk image or a Linux archive), never together with the `portal`
+  command, and works with it in both directions.
+
 ## [0.5.3] - 2026-11-05
 
 ### Added

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Portal
+GenericName=File Transfer
+Comment=Send files and folders straight to another computer
+Exec=portal-desktop
+Icon=portal-desktop
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=send;receive;share;transfer;files;
+StartupWMClass=portal-desktop
