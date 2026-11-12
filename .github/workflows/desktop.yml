@@ -64,8 +64,10 @@ jobs:
         include:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: aarch64-pc-windows-msvc, os: windows-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: aarch64-apple-darwin, os: macos-latest }
+          # Intel Macs build both: GitHub often runs out of Apple Silicon
+          # ones, and a queued job is cancelled after 15 minutes.
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-apple-darwin, os: macos-15-intel }
           # The oldest supported Ubuntu runner, so the app needs only an old glibc.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
@@ -187,7 +189,7 @@ jobs:
       matrix:
         include:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
-          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
     env:
