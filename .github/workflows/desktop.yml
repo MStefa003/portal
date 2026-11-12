@@ -78,7 +78,14 @@ jobs:
       APPLE_CERTIFICATE: ${{ inputs.tag && secrets.APPLE_CERTIFICATE || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - run: rustup target add ${{ matrix.target }}
+      # Retried: a dropped download of the toolchain would fail the job.
+      - shell: bash
+        run: |
+          for try in 1 2 3; do
+            rustup target add ${{ matrix.target }} && exit 0
+            sleep 20
+          done
+          exit 1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: inputs.tag == ''
         with:
