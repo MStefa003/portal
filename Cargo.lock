@@ -3952,7 +3952,7 @@ dependencies = [
 
 [[package]]
 name = "portal-cli"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "portal-core"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "fastcdc",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "portal-desktop"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "iced",
  "mainline",
@@ -4011,7 +4011,7 @@ dependencies = [
 
 [[package]]
 name = "portal-net"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "futures-util",
@@ -4032,7 +4032,7 @@ dependencies = [
 
 [[package]]
 name = "portal-proto"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "portal-rendezvous"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",

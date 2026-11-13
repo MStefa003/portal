@@ -6,6 +6,8 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
 ### Added
 - Portal Desktop: an optional app with a window, for people who do not use
   the command line. Drop files or folders on it to get a code, or type a
